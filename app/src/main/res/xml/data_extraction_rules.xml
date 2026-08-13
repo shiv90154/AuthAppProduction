@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android 12+ (API 31+) cloud backup / device-transfer rules.
+
+   Everything is backed up EXCEPT license_prefs — the activation/device-lock
+   state (see com.example.myapplication.license.LicenseRepository). That file
+   is deliberately excluded: it's tied to THIS physical device's ID, and
+   letting Android silently restore it onto a different phone would let that
+   phone start up believing it's already activated. Kits, custom sounds, MIDI
+   mappings and app settings are fine to carry over on a phone upgrade, so
+   everything else is left included by default.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="license_prefs.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="license_prefs.xml" />
+    </device-transfer>
+</data-extraction-rules>

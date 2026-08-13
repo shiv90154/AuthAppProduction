@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Android 6.0–11 (API 23–30) Auto Backup rules — the pre-Android-12
+   mechanism. android:dataExtractionRules (data_extraction_rules.xml) takes
+   over on API 31+ instead; both files need the same exclusion since minSdk
+   is 24, spanning both eras.
+
+   license_prefs is excluded for the same reason as in data_extraction_rules.xml:
+   it's this specific physical device's activation/lock state and must never
+   be silently restored onto a different device via Android's backup system.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="license_prefs.xml"/>
+</full-backup-content>

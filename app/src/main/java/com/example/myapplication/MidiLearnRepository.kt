@@ -56,8 +56,26 @@ object MidiLearnRepository {
     // ── Backup / Restore support ────────────────────────────────────────────
     fun exportBackup(): String? = prefs()?.getString(KEY_MAPPINGS, null)
 
+    /** Throws if [raw] isn't valid JSON; writes nothing either way. */
+    fun validateBackupPayload(raw: String) {
+        JSONObject(raw)
+    }
+
     fun importBackup(raw: String?) {
         if (raw == null) return
+        // BUG FIX: same validation-hole class fixed in KitRepository — this
+        // used to write the backup's raw string straight into
+        // SharedPreferences unchecked. A truncated/corrupted zip entry got
+        // written verbatim; the next loadRaw() call then hit its
+        // JSONException fallback and returned an empty JSONObject(),
+        // silently wiping every learned pad note mapping. Parse first and
+        // reject (leaving existing mappings untouched) rather than write bad
+        // data.
+        try {
+            validateBackupPayload(raw)
+        } catch (e: Exception) {
+            throw IllegalStateException("Backup contains invalid MIDI note mapping data", e)
+        }
         prefs()?.edit()?.putString(KEY_MAPPINGS, raw)?.apply()
     }
 }

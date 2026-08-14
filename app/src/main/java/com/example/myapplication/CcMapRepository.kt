@@ -55,9 +55,24 @@ object CcMapRepository {
         // silently never fire — the older target kept winning every time.
         // One CC -> at most one target, so re-learning it here must strip it
         // from wherever it used to point.
+        //
+        // BUG FIX 2: this used to compare against
+        // `obj.optInt(existingTarget, DEFAULTS[existingTarget] ?: -1)` but
+        // then clear the collision with `obj.remove(existingTarget)` — a
+        // no-op when existingTarget was still on its built-in default (e.g.
+        // VOLUME=11) and had never been explicitly saved, since there was no
+        // key to remove. Learning PITCH onto CC 11 then still left
+        // getCc("VOLUME") returning the default 11 afterward, so both
+        // targets matched the same incoming CC and the dispatcher's `when`
+        // (which checks VOLUME first) kept firing VOLUME — PITCH showed as
+        // "learned" in the UI but silently never fired. Use getCc() (which
+        // already applies the same default fallback) for the comparison,
+        // and explicitly persist -1 (not remove) so a default-backed
+        // collision is actually recorded as unmapped rather than silently
+        // falling back to the same default on the next read.
         TARGETS.forEach { existingTarget ->
-            if (existingTarget != target && obj.optInt(existingTarget, DEFAULTS[existingTarget] ?: -1) == ccNumber) {
-                obj.remove(existingTarget)
+            if (existingTarget != target && getCc(existingTarget) == ccNumber) {
+                obj.put(existingTarget, -1)
             }
         }
         obj.put(target, ccNumber)
@@ -83,8 +98,25 @@ object CcMapRepository {
     // ── Backup / Restore support ────────────────────────────────────────────
     fun exportBackup(): String? = prefs()?.getString(KEY_MAPPINGS, null)
 
+    /** Throws if [raw] isn't valid JSON; writes nothing either way. */
+    fun validateBackupPayload(raw: String) {
+        JSONObject(raw)
+    }
+
     fun importBackup(raw: String?) {
         if (raw == null) return
+        // BUG FIX: this used to write the backup's raw string straight into
+        // SharedPreferences with no validation — the same failure class
+        // KitRepository.importBackup() was fixed for. A truncated/corrupted
+        // zip entry got written verbatim; the next loadRaw() call then hit
+        // its JSONException fallback and returned an empty JSONObject(),
+        // silently wiping every saved CC mapping. Parse first and reject
+        // (leaving existing mappings untouched) rather than write bad data.
+        try {
+            validateBackupPayload(raw)
+        } catch (e: Exception) {
+            throw IllegalStateException("Backup contains invalid CC mapping data", e)
+        }
         prefs()?.edit()?.putString(KEY_MAPPINGS, raw)?.apply()
     }
 }

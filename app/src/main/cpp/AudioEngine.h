@@ -47,6 +47,11 @@ struct Voice {
     // atomic (releasing is the only cross-thread signal needed).
     std::atomic<bool>  releasing{false};
     float              releaseGain = 1.0f;
+    // Monotonically increasing claim order, used only to pick a voice to
+    // steal (the oldest one) when the whole 64-voice pool is exhausted —
+    // see AudioEngine::triggerPad(). Not part of the active/ready publish
+    // protocol, so relaxed ordering is fine.
+    std::atomic<uint64_t> claimSeq{0};
 };
 
 struct DelayTap {
@@ -101,6 +106,9 @@ private:
     std::array<Voice, kMaxVoices>      voices_;
     std::mutex  bufferMutex_;
     int         outputSampleRate_ = 48000;
+    // Incremented on every voice claim (fresh or stolen); lets triggerPad
+    // find the oldest playing voice to steal when the pool is exhausted.
+    std::atomic<uint64_t> voiceClaimCounter_{0};
 
     // Smoothed polyphony headroom — only ever touched from the audio
     // callback thread (onAudioReady), so no atomic needed. See onAudioReady

@@ -226,6 +226,21 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
     }
 
     try {
+        // BUG FIX: each repo's importBackup() validates its own payload
+        // before writing, but restoring them one after another still let a
+        // LATER repo's bad payload throw after an EARLIER repo had already
+        // committed — e.g. kits fully replaced by the backup while
+        // preferences/CC/MIDI maps silently stayed on their old values, a
+        // hybrid state that isn't "restore succeeded" or "restore failed",
+        // just corrupted. Validate all four payloads up front (no writes)
+        // so a bad payload anywhere aborts the whole restore before any
+        // repository is touched, matching the "leaves existing data
+        // untouched on failure" guarantee documented for this screen.
+        root.optJSONObject("kits")?.let { KitRepository.validateBackupPayload(it) }
+        root.optJSONObject("preferences")?.let { PreferencesRepository.validateBackupPayload(it) }
+        if (root.has("ccMap")) CcMapRepository.validateBackupPayload(root.getString("ccMap"))
+        if (root.has("midiNoteMap")) MidiLearnRepository.validateBackupPayload(root.getString("midiNoteMap"))
+
         root.optJSONObject("kits")?.let { KitRepository.importBackup(it) }
         root.optJSONObject("preferences")?.let { PreferencesRepository.importBackup(it) }
         if (root.has("ccMap")) CcMapRepository.importBackup(root.getString("ccMap"))

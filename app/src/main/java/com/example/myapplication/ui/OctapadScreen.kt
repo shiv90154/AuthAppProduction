@@ -372,7 +372,23 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // same A/B/C → kit precedence already used by nativeSlotsFor()/fire()
     // below for playback, so editing now targets whichever kit is actually
     // audible for the current bank selection.
-    val activeBankKit = when {
+    //
+    // BUG FIX 2: this was a plain `val` (a one-time Int snapshot), which is
+    // fine for lambdas that get recreated every recomposition (all the
+    // on-screen knobs/sliders), but MidiEventBus.onPadHit/onControlChange
+    // below are installed inside `LaunchedEffect(Unit)` — a block that runs
+    // exactly ONCE for the whole composable's lifetime. That one-time
+    // closure captured whatever bank was active at first composition
+    // (typically Bank A at launch) forever; switching banks afterward had
+    // zero effect on anything triggered via MIDI note/CC, only on touch
+    // (whose onPress lambdas are recreated fresh every recomposition). Made
+    // this a function instead of a val: `bankMode`/`currentKit*` are
+    // `by remember { mutableStateOf(...) }` delegates, so referencing them
+    // inside a function body always reads the CURRENT value at call time —
+    // even from a closure that was itself created once and never rebuilt —
+    // because delegated property reads aren't snapshotted, unlike a captured
+    // plain Int.
+    fun bankKitIdx(): Int = when {
         'A' in bankMode -> currentKit
         'B' in bankMode -> currentKitB
         'C' in bankMode -> currentKitC
@@ -440,11 +456,18 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // quick "EDIT PAD" menu — wipes both a custom AudioRepository assignment
     // (if any) AND the factory sound reference, so CLEAR always actually
     // leaves the pad silent regardless of which kind of sound it had.
+    //
+    // BUG FIX: used to always target kits[currentKit] (Bank A) regardless of
+    // which bank was actually selected — clearing a pad while Bank B/C was
+    // active silently cleared Bank A's (inaudible) sound instead, so the pad
+    // you were looking at kept playing. Routed through bankKitIdx(), same
+    // fix pattern as the FX knobs.
     fun clearPadSound(padIndex: Int) {
-        AudioRepository.audioForPad(currentKit, padIndex)?.let { item ->
+        val kitIdx = bankKitIdx()
+        AudioRepository.audioForPad(kitIdx, padIndex)?.let { item ->
             AudioRepository.unassignPad(item.id)
         }
-        kits[currentKit].sounds[padIndex] = -1
+        kits[kitIdx].sounds[padIndex] = -1
         DrumEngine.invalidatePad(padIndex)
         persistKits()
     }
@@ -514,12 +537,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     // ── NEW: Recording stop + save karne ka shared logic —
 // button click aur auto-timeout dono isi function ko use karenge ──
+    // BUG FIX: always saved into kits[currentKit] (Bank A) regardless of the
+    // active bank — recording into a pad while Bank B/C was selected saved
+    // the take into Bank A's (inaudible) kit instead of the one actually
+    // being played, so it looked like the recording silently vanished.
     fun stopRecordingAndSave() {
         val file = padRecorder.stopRecording()
 
         if (file != null) {
             AudioRepository.assignRecordedAudio(
-                kitIndex = currentKit,
+                kitIndex = bankKitIdx(),
                 padIndex = recordingPad,
                 file = file
             )
@@ -554,7 +581,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // Per-pad FX playback mode: ONESHOT (default, obeys the global Loop
         // toggle), LOOP (always repeats at tempo), MIX (layers on top of any
         // already-sounding voice for this pad instead of cutting it off).
-        val playMode = kits[activeBankKit].padPlayMode.getOrElse(index) { "ONESHOT" }
+        val playMode = kits[bankKitIdx()].padPlayMode.getOrElse(index) { "ONESHOT" }
         val allowOverlap = playMode == "MIX"
         // NOTE: must stay a function reading the pad's CURRENT play mode and
         // the CURRENT loopEnabled — not values captured once — because a
@@ -568,7 +595,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // reading its own stale snapshot forever. Re-reading both live on
         // every check fixes both.
         fun effectiveLoop(): Boolean {
-            val currentMode = kits[activeBankKit].padPlayMode.getOrElse(index) { "ONESHOT" }
+            val currentMode = kits[bankKitIdx()].padPlayMode.getOrElse(index) { "ONESHOT" }
             return when (currentMode) {
                 "LOOP" -> true
                 "MIX"  -> false
@@ -614,7 +641,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // Only the "wait for playback to finish / loop again / clear the
         // LCD" bookkeeping below — which doesn't affect what you actually
         // hear — is handed off to a coroutine.
-        val assigned = AudioRepository.audioForPad(activeBankKit, index)
+        val assigned = AudioRepository.audioForPad(bankKitIdx(), index)
         val uriToShow: Uri?
         val durationToShow: Long
         if (exclusiveMode && currentStreamId != 0) {
@@ -632,7 +659,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             // reported as "tone cut" and "loop still broken". Now uses the
             // real decoded duration (cached by DrumEngine.loadPad the first
             // time this pad's sample was loaded) when available.
-            val factoryResId = kits[activeBankKit].sounds.getOrElse(index) { -1 }
+            val factoryResId = kits[bankKitIdx()].sounds.getOrElse(index) { -1 }
             durationToShow = com.example.myapplication.ui.audio.PadDurationCache.get(factoryResId)
                 ?: DEFAULT_PAD_DURATION_MS
         }
@@ -657,20 +684,20 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             // currently-active banks. Now every ACTIVE bank's own choke
             // level + group membership is checked, so a pad hit on Bank A
             // layered with Bank B/C chokes correctly across the combination.
-            val activeBankKits = buildList {
+            val bankKitIdx()s = buildList {
                 if ('A' in bankMode) add(currentKit)
                 if ('B' in bankMode) add(currentKitB)
                 if ('C' in bankMode) add(currentKitC)
             }.filter { it in kits.indices }
 
-            fun chokesTogether(padA: Int, padB: Int): Boolean = activeBankKits.any { bankKit ->
+            fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdx()s.any { bankKit ->
                 val activeLevel = kits[bankKit].activeChokeLevelState.value
                 activeLevel != 0 &&
                     activeLevel in kits[bankKit].chokeGroups[padA] &&
                     activeLevel in kits[bankKit].chokeGroups[padB]
             }
 
-            if (activeBankKits.isNotEmpty()) {
+            if (bankKitIdx()s.isNotEmpty()) {
                 chokeActivePads.keys.toList().forEach { otherPad ->
                     if (otherPad != index && chokesTogether(index, otherPad)) {
                         nativeSlotsFor(otherPad).forEach { DrumEngine.stop(it) }
@@ -741,7 +768,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // rate") so that one still uses the BPM-gated window;
                     // only the explicit per-pad LOOP mode is now a true
                     // immediate back-to-back loop.
-                    val currentMode = kits[activeBankKit].padPlayMode.getOrElse(index) { "ONESHOT" }
+                    val currentMode = kits[bankKitIdx()].padPlayMode.getOrElse(index) { "ONESHOT" }
                     val waitWindowMs = when {
                         currentMode == "LOOP" -> durationToShow
                         effectiveLoop()        -> maxOf(beatIntervalMs, durationToShow)
@@ -872,26 +899,26 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // at whatever it was when you last switched pads. That's exactly what
     // reads as "uncontrollable echo instead of a proper delay". Fixed by
     // reading the live value into its own variable and keying on THAT.
-    val curPadDelayMs = if (activeBankKit in kits.indices)
-        kits[activeBankKit].padDelayMs.getOrElse(selectedPad) { 300 } else 300
+    val curPadDelayMs = if (bankKitIdx() in kits.indices)
+        kits[bankKitIdx()].padDelayMs.getOrElse(selectedPad) { 300 } else 300
 
     // NEW: delay on/off read from the CURRENT pad's own kit — per-pad-per-kit,
     // not a single global toggle, so it never leaks into a different patch.
     // BUG FIX: was hardcoded to kits[currentKit] (Bank A) — reading/writing
     // this while Bank B/C was active silently edited Bank A's data instead
-    // of whichever bank was actually audible. Same activeBankKit fix as
+    // of whichever bank was actually audible. Same bankKitIdx() fix as
     // volume/pitch above.
-    val curPadDelayEnabled = if (activeBankKit in kits.indices)
-        kits[activeBankKit].padDelayEnabled.getOrElse(selectedPad) { false } else false
+    val curPadDelayEnabled = if (bankKitIdx() in kits.indices)
+        kits[bankKitIdx()].padDelayEnabled.getOrElse(selectedPad) { false } else false
 
     fun setCurPadDelayEnabled(enabled: Boolean) {
-        if (activeBankKit in kits.indices) {
-            kits[activeBankKit].padDelayEnabled[selectedPad] = enabled
+        if (bankKitIdx() in kits.indices) {
+            kits[bankKitIdx()].padDelayEnabled[selectedPad] = enabled
             persistKits()
         }
     }
 
-    LaunchedEffect(curPadDelayEnabled, selectedPad, activeBankKit, delayChokePad, curPadDelayMs, delayLevel) {
+    LaunchedEffect(curPadDelayEnabled, selectedPad, bankKitIdx(), delayChokePad, curPadDelayMs, delayLevel) {
         NativeBridge.setDelayEnabled(curPadDelayEnabled)
         NativeBridge.setDelayParams(delayLevel, 1)   // decay per tap (FX panel's DELAY LEVEL knob), 1 tap — client wants exactly 2 sounds total per hit (original + 1 echo)
         // BUG FIX: this used to hardcode 48000Hz to convert the DLY TIME knob
@@ -905,12 +932,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     }
 
     // Sync per-pad EQ+level to native whenever selected pad or kit changes
-    val curPadLevel = if (activeBankKit in kits.indices) kits[activeBankKit].padLevels[selectedPad] else 1f
-    val curPadEqLow = if (activeBankKit in kits.indices) kits[activeBankKit].padEqLow[selectedPad]  else 1f
-    val curPadEqMid = if (activeBankKit in kits.indices) kits[activeBankKit].padEqMid[selectedPad]  else 1f
-    val curPadEqHigh= if (activeBankKit in kits.indices) kits[activeBankKit].padEqHigh[selectedPad] else 1f
+    val curPadLevel = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLevels[selectedPad] else 1f
+    val curPadEqLow = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqLow[selectedPad]  else 1f
+    val curPadEqMid = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqMid[selectedPad]  else 1f
+    val curPadEqHigh= if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqHigh[selectedPad] else 1f
 
-    LaunchedEffect(selectedPad, activeBankKit, curPadLevel, curPadEqLow, curPadEqMid, curPadEqHigh) {
+    LaunchedEffect(selectedPad, bankKitIdx(), curPadLevel, curPadEqLow, curPadEqMid, curPadEqHigh) {
         NativeBridge.setMasterLevel(curPadLevel)
         NativeBridge.setEqBands(curPadEqLow, curPadEqMid, curPadEqHigh)
     }
@@ -919,8 +946,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // native engine), Pan and Gain are true per-voice fields keyed by pad
     // index, so this updates whatever's currently playing on THIS pad, not
     // the whole mix.
-    val curPadPan  = if (activeBankKit in kits.indices) kits[activeBankKit].padPan.getOrElse(selectedPad) { 0f }  else 0f
-    val curPadGain = if (activeBankKit in kits.indices) kits[activeBankKit].padGain.getOrElse(selectedPad) { 1f } else 1f
+    val curPadPan  = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padPan.getOrElse(selectedPad) { 0f }  else 0f
+    val curPadGain = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padGain.getOrElse(selectedPad) { 1f } else 1f
 
     // BUG FIX: these used to call DrumEngine.setPan/setGain(selectedPad, ...)
     // directly with the raw 0-7 pad index — always Bank A's native slots
@@ -929,10 +956,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // unloaded) native voice. Routed through nativeSlotsFor(), same as every
     // other live per-pad control here, so it hits whichever native slot(s)
     // are actually audible for the current bank selection.
-    LaunchedEffect(selectedPad, activeBankKit, bankMode, curPadPan) {
+    LaunchedEffect(selectedPad, bankKitIdx(), bankMode, curPadPan) {
         nativeSlotsFor(selectedPad).forEach { DrumEngine.setPan(it, curPadPan) }
     }
-    LaunchedEffect(selectedPad, activeBankKit, bankMode, curPadGain) {
+    LaunchedEffect(selectedPad, bankKitIdx(), bankMode, curPadGain) {
         nativeSlotsFor(selectedPad).forEach { DrumEngine.setGain(it, curPadGain) }
     }
 
@@ -1070,10 +1097,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // pushing the live value to native slot `selectedPad`
                     // (0-7, i.e. Bank A's native slots) no matter which bank
                     // was actually selected — so the knob silently edited Bank
-                    // A while Bank B/C was playing. Use activeBankKit for the
+                    // A while Bank B/C was playing. Use bankKitIdx() for the
                     // stored value and nativeSlotsFor() for the live update,
                     // same as onPadHit()/the on-screen sliders.
-                    kits[activeBankKit].volumes[selectedPad] = newVolume
+                    kits[bankKitIdx()].volumes[selectedPad] = newVolume
                     nativeSlotsFor(selectedPad).forEach { DrumEngine.setVolume(it, newVolume) }
                     persistKits()   // NEW: save immediately so it survives app close
 
@@ -1084,7 +1111,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 cc.getCc("PITCH") -> {
                     val newPitch = 0.5f + normalized * 1.5f
-                    kits[activeBankKit].pitches[selectedPad] = newPitch
+                    kits[bankKitIdx()].pitches[selectedPad] = newPitch
                     nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, newPitch) }
                     persistKits()   // NEW: save immediately so it survives app close
 
@@ -1097,20 +1124,20 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // BUG FIX: same Bank A-only bug as VOLUME/PITCH above —
                     // was always kits[currentKit], now targets whichever bank
                     // is actually active.
-                    kits[activeBankKit].padEqLow[selectedPad] = normalized * 2f
-                    NativeBridge.setEqBands(kits[activeBankKit].padEqLow[selectedPad], kits[activeBankKit].padEqMid[selectedPad], kits[activeBankKit].padEqHigh[selectedPad])
+                    kits[bankKitIdx()].padEqLow[selectedPad] = normalized * 2f
+                    NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
                     persistKits()
                 }
 
                 cc.getCc("EQ_MID") -> {
-                    kits[activeBankKit].padEqMid[selectedPad] = normalized * 2f
-                    NativeBridge.setEqBands(kits[activeBankKit].padEqLow[selectedPad], kits[activeBankKit].padEqMid[selectedPad], kits[activeBankKit].padEqHigh[selectedPad])
+                    kits[bankKitIdx()].padEqMid[selectedPad] = normalized * 2f
+                    NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
                     persistKits()
                 }
 
                 cc.getCc("EQ_HIGH") -> {
-                    kits[activeBankKit].padEqHigh[selectedPad] = normalized * 2f
-                    NativeBridge.setEqBands(kits[activeBankKit].padEqLow[selectedPad], kits[activeBankKit].padEqMid[selectedPad], kits[activeBankKit].padEqHigh[selectedPad])
+                    kits[bankKitIdx()].padEqHigh[selectedPad] = normalized * 2f
+                    NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
                     persistKits()
                 }
 
@@ -1226,7 +1253,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // NEW: toggles padIndex's membership in choke-level `level` (1..6) for
     // the current kit, then persists the change.
     fun toggleChokeGroup(padIndex: Int, level: Int) {
-        val groups = kits[activeBankKit].chokeGroups[padIndex]
+        val groups = kits[bankKitIdx()].chokeGroups[padIndex]
         if (groups.contains(level)) {
             groups.remove(level)
         } else {
@@ -1238,7 +1265,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // NEW: sets (or clears, if the same level is tapped again) the active
     // choke level for the current kit, then persists it.
     fun setActiveChokeLevel(level: Int) {
-        val current = kits[activeBankKit].activeChokeLevelState
+        val current = kits[bankKitIdx()].activeChokeLevelState
         current.value = if (current.value == level) 0 else level
         persistKits()
     }
@@ -1246,35 +1273,42 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
 
 
+    // BUG FIX: every field below used to unconditionally target
+    // kits[currentKit] (Bank A) and reload native slots 0-7 (loadPad's
+    // nativeSlot defaults to the raw pad index), regardless of which bank
+    // was actually selected — dragging a swap while Bank B/C was active
+    // silently rewrote Bank A's (inaudible) kit and native buffers instead
+    // of the one actually being played, so the swap looked like it did
+    // nothing. Routed kit reads/writes through bankKitIdx() and reloads
+    // through nativeSlotsFor(), same fix pattern as the FX knobs.
     fun swapPads(source: Int, target: Int) {
 
-
-
+        val kitIdx = bankKitIdx()
         val s = source - 1
         val t = target - 1
 
         // ---------- Volume ----------
-        val tempVolume = kits[currentKit].volumes[s]
-        kits[currentKit].volumes[s] = kits[currentKit].volumes[t]
-        kits[currentKit].volumes[t] = tempVolume
+        val tempVolume = kits[kitIdx].volumes[s]
+        kits[kitIdx].volumes[s] = kits[kitIdx].volumes[t]
+        kits[kitIdx].volumes[t] = tempVolume
 
         // ---------- Pitch ----------
-        val tempPitch = kits[currentKit].pitches[s]
-        kits[currentKit].pitches[s] = kits[currentKit].pitches[t]
-        kits[currentKit].pitches[t] = tempPitch
+        val tempPitch = kits[kitIdx].pitches[s]
+        kits[kitIdx].pitches[s] = kits[kitIdx].pitches[t]
+        kits[kitIdx].pitches[t] = tempPitch
 
         // ---------- Imported / Recorded Audio ----------
 
-        val tempSound = kits[currentKit].sounds[s]
+        val tempSound = kits[kitIdx].sounds[s]
 
-        kits[currentKit].sounds[s] =
-            kits[currentKit].sounds[t]
+        kits[kitIdx].sounds[s] =
+            kits[kitIdx].sounds[t]
 
-        kits[currentKit].sounds[t] =
+        kits[kitIdx].sounds[t] =
             tempSound
 
         AudioRepository.swapPads(
-            currentKit,
+            kitIdx,
             s,
             t
         )
@@ -1285,74 +1319,69 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // behind on the old pad index — the sound moved but its behavior
         // didn't, which reads as a broken/partial swap. Everything per-pad
         // now moves together.
-        val tempLevel = kits[currentKit].padLevels[s]
-        kits[currentKit].padLevels[s] = kits[currentKit].padLevels[t]
-        kits[currentKit].padLevels[t] = tempLevel
+        val tempLevel = kits[kitIdx].padLevels[s]
+        kits[kitIdx].padLevels[s] = kits[kitIdx].padLevels[t]
+        kits[kitIdx].padLevels[t] = tempLevel
 
-        val tempEqLow = kits[currentKit].padEqLow[s]
-        kits[currentKit].padEqLow[s] = kits[currentKit].padEqLow[t]
-        kits[currentKit].padEqLow[t] = tempEqLow
+        val tempEqLow = kits[kitIdx].padEqLow[s]
+        kits[kitIdx].padEqLow[s] = kits[kitIdx].padEqLow[t]
+        kits[kitIdx].padEqLow[t] = tempEqLow
 
-        val tempEqMid = kits[currentKit].padEqMid[s]
-        kits[currentKit].padEqMid[s] = kits[currentKit].padEqMid[t]
-        kits[currentKit].padEqMid[t] = tempEqMid
+        val tempEqMid = kits[kitIdx].padEqMid[s]
+        kits[kitIdx].padEqMid[s] = kits[kitIdx].padEqMid[t]
+        kits[kitIdx].padEqMid[t] = tempEqMid
 
-        val tempEqHigh = kits[currentKit].padEqHigh[s]
-        kits[currentKit].padEqHigh[s] = kits[currentKit].padEqHigh[t]
-        kits[currentKit].padEqHigh[t] = tempEqHigh
+        val tempEqHigh = kits[kitIdx].padEqHigh[s]
+        kits[kitIdx].padEqHigh[s] = kits[kitIdx].padEqHigh[t]
+        kits[kitIdx].padEqHigh[t] = tempEqHigh
 
-        val tempDelayMs = kits[currentKit].padDelayMs[s]
-        kits[currentKit].padDelayMs[s] = kits[currentKit].padDelayMs[t]
-        kits[currentKit].padDelayMs[t] = tempDelayMs
+        val tempDelayMs = kits[kitIdx].padDelayMs[s]
+        kits[kitIdx].padDelayMs[s] = kits[kitIdx].padDelayMs[t]
+        kits[kitIdx].padDelayMs[t] = tempDelayMs
 
-        val tempLengthPct = kits[currentKit].padLengthPct[s]
-        kits[currentKit].padLengthPct[s] = kits[currentKit].padLengthPct[t]
-        kits[currentKit].padLengthPct[t] = tempLengthPct
+        val tempLengthPct = kits[kitIdx].padLengthPct[s]
+        kits[kitIdx].padLengthPct[s] = kits[kitIdx].padLengthPct[t]
+        kits[kitIdx].padLengthPct[t] = tempLengthPct
 
-        val tempReverse = kits[currentKit].padReverse[s]
-        kits[currentKit].padReverse[s] = kits[currentKit].padReverse[t]
-        kits[currentKit].padReverse[t] = tempReverse
+        val tempReverse = kits[kitIdx].padReverse[s]
+        kits[kitIdx].padReverse[s] = kits[kitIdx].padReverse[t]
+        kits[kitIdx].padReverse[t] = tempReverse
 
-        val tempPlayMode = kits[currentKit].padPlayMode[s]
-        kits[currentKit].padPlayMode[s] = kits[currentKit].padPlayMode[t]
-        kits[currentKit].padPlayMode[t] = tempPlayMode
+        val tempPlayMode = kits[kitIdx].padPlayMode[s]
+        kits[kitIdx].padPlayMode[s] = kits[kitIdx].padPlayMode[t]
+        kits[kitIdx].padPlayMode[t] = tempPlayMode
 
-        val tempPan = kits[currentKit].padPan[s]
-        kits[currentKit].padPan[s] = kits[currentKit].padPan[t]
-        kits[currentKit].padPan[t] = tempPan
+        val tempPan = kits[kitIdx].padPan[s]
+        kits[kitIdx].padPan[s] = kits[kitIdx].padPan[t]
+        kits[kitIdx].padPan[t] = tempPan
 
-        val tempGain = kits[currentKit].padGain[s]
-        kits[currentKit].padGain[s] = kits[currentKit].padGain[t]
-        kits[currentKit].padGain[t] = tempGain
+        val tempGain = kits[kitIdx].padGain[s]
+        kits[kitIdx].padGain[s] = kits[kitIdx].padGain[t]
+        kits[kitIdx].padGain[t] = tempGain
 
-        val tempDelayEnabled = kits[currentKit].padDelayEnabled[s]
-        kits[currentKit].padDelayEnabled[s] = kits[currentKit].padDelayEnabled[t]
-        kits[currentKit].padDelayEnabled[t] = tempDelayEnabled
+        val tempDelayEnabled = kits[kitIdx].padDelayEnabled[s]
+        kits[kitIdx].padDelayEnabled[s] = kits[kitIdx].padDelayEnabled[t]
+        kits[kitIdx].padDelayEnabled[t] = tempDelayEnabled
 
-        val sGroups = kits[currentKit].chokeGroups[s].toList()
-        val tGroups = kits[currentKit].chokeGroups[t].toList()
-        kits[currentKit].chokeGroups[s].clear()
-        kits[currentKit].chokeGroups[s].addAll(tGroups)
-        kits[currentKit].chokeGroups[t].clear()
-        kits[currentKit].chokeGroups[t].addAll(sGroups)
+        val sGroups = kits[kitIdx].chokeGroups[s].toList()
+        val tGroups = kits[kitIdx].chokeGroups[t].toList()
+        kits[kitIdx].chokeGroups[s].clear()
+        kits[kitIdx].chokeGroups[s].addAll(tGroups)
+        kits[kitIdx].chokeGroups[t].clear()
+        kits[kitIdx].chokeGroups[t].addAll(sGroups)
 
         // ---------- Reload Native Engine ----------
-        DrumEngine.invalidatePad(s)
-        DrumEngine.invalidatePad(t)
+        // Reload every native slot the currently active bank combination
+        // actually maps to (could be more than one, e.g. bank mode "AB").
+        nativeSlotsFor(s).forEach { DrumEngine.invalidatePad(it) }
+        nativeSlotsFor(t).forEach { DrumEngine.invalidatePad(it) }
 
-        DrumEngine.loadPad(
-            context,
-            currentKit,
-            s,
-            kits[currentKit].sounds[s]
-        )
-
-        DrumEngine.loadPad(
-            context,
-            currentKit,
-            t,
-            kits[currentKit].sounds[t]
-        )
+        nativeSlotsFor(s).forEach { slot ->
+            DrumEngine.loadPad(context, kitIdx, s, kits[kitIdx].sounds[s], nativeSlot = slot)
+        }
+        nativeSlotsFor(t).forEach { slot ->
+            DrumEngine.loadPad(context, kitIdx, t, kits[kitIdx].sounds[t], nativeSlot = slot)
+        }
         if (selectedPad == s || selectedPad == t) {
             updatePadDisplay(selectedPad)
         }
@@ -1791,12 +1820,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // setActiveChokeLevel and every per-pad control below used to
                 // read/write kits[currentKit] (Bank A) unconditionally — the
                 // same bug the volume/pitch sliders had. All now target
-                // activeBankKit so the CHOKE grid, FX knobs and LOOP panel
+                // bankKitIdx() so the CHOKE grid, FX knobs and LOOP panel
                 // controls actually affect whichever bank is selected.
-                allPadChokeGroups = kits[activeBankKit].chokeGroups.map { it.toList() },
+                allPadChokeGroups = kits[bankKitIdx()].chokeGroups.map { it.toList() },
                 onToggleChokeGroup = { padIndex, level -> toggleChokeGroup(padIndex, level) },
                 // NEW: which level is currently active/live for this kit
-                activeChokeLevel = kits[activeBankKit].activeChokeLevelState.value,
+                activeChokeLevel = kits[bankKitIdx()].activeChokeLevelState.value,
                 onSelectActiveChokeLevel = { level -> setActiveChokeLevel(level) },
 
 
@@ -1808,80 +1837,80 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onDelayLevelChange = { delayLevel = it },
                 speed = speed,
                 onSpeedChange = { speed = it },
-                masterLevel = if (activeBankKit in kits.indices) kits[activeBankKit].padLevels[selectedPad] else 1f,
-                eqLow  = if (activeBankKit in kits.indices) kits[activeBankKit].padEqLow[selectedPad]  else 1f,
-                eqMid  = if (activeBankKit in kits.indices) kits[activeBankKit].padEqMid[selectedPad]  else 1f,
-                eqHigh = if (activeBankKit in kits.indices) kits[activeBankKit].padEqHigh[selectedPad] else 1f,
+                masterLevel = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLevels[selectedPad] else 1f,
+                eqLow  = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqLow[selectedPad]  else 1f,
+                eqMid  = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqMid[selectedPad]  else 1f,
+                eqHigh = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqHigh[selectedPad] else 1f,
                 onMasterLevelChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padLevels[selectedPad] = v
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padLevels[selectedPad] = v
                         NativeBridge.setMasterLevel(v)
                         persistKits()
                     }
                 },
                 onEqLowChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padEqLow[selectedPad] = v
-                        NativeBridge.setEqBands(v, kits[activeBankKit].padEqMid[selectedPad], kits[activeBankKit].padEqHigh[selectedPad])
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padEqLow[selectedPad] = v
+                        NativeBridge.setEqBands(v, kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
                         persistKits()
                     }
                 },
                 onEqMidChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padEqMid[selectedPad] = v
-                        NativeBridge.setEqBands(kits[activeBankKit].padEqLow[selectedPad], v, kits[activeBankKit].padEqHigh[selectedPad])
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padEqMid[selectedPad] = v
+                        NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], v, kits[bankKitIdx()].padEqHigh[selectedPad])
                         persistKits()
                     }
                 },
                 onEqHighChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padEqHigh[selectedPad] = v
-                        NativeBridge.setEqBands(kits[activeBankKit].padEqLow[selectedPad], kits[activeBankKit].padEqMid[selectedPad], v)
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padEqHigh[selectedPad] = v
+                        NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], v)
                         persistKits()
                     }
                 },
-                delayTimeMs = if (activeBankKit in kits.indices)
-                    kits[activeBankKit].padDelayMs[selectedPad] else 300,
+                delayTimeMs = if (bankKitIdx() in kits.indices)
+                    kits[bankKitIdx()].padDelayMs[selectedPad] else 300,
                 onDelayTimeChange = { ms ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padDelayMs[selectedPad] = ms
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padDelayMs[selectedPad] = ms
                         persistKits()   // volume/pitch ki tarah turant save
                     }
                 },
-                padLengthPct = if (activeBankKit in kits.indices) kits[activeBankKit].padLengthPct[selectedPad] else 1f,
+                padLengthPct = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLengthPct[selectedPad] else 1f,
                 onPadLengthChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padLengthPct[selectedPad] = v
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padLengthPct[selectedPad] = v
                         persistKits()
                     }
                 },
-                padReverse = if (activeBankKit in kits.indices) kits[activeBankKit].padReverse[selectedPad] else false,
+                padReverse = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padReverse[selectedPad] else false,
                 onReverseChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padReverse[selectedPad] = v
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padReverse[selectedPad] = v
                         persistKits()
                     }
                 },
-                padPlayMode = if (activeBankKit in kits.indices) kits[activeBankKit].padPlayMode[selectedPad] else "ONESHOT",
+                padPlayMode = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padPlayMode[selectedPad] else "ONESHOT",
                 onPlayModeChange = { mode ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padPlayMode[selectedPad] = mode
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padPlayMode[selectedPad] = mode
                         persistKits()
                     }
                 },
                 // NEW: per-pad Pan/Gain FX knobs
-                padPan = if (activeBankKit in kits.indices) kits[activeBankKit].padPan.getOrElse(selectedPad) { 0f } else 0f,
+                padPan = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padPan.getOrElse(selectedPad) { 0f } else 0f,
                 onPanChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padPan[selectedPad] = v
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padPan[selectedPad] = v
                         nativeSlotsFor(selectedPad).forEach { DrumEngine.setPan(it, v) }
                         persistKits()
                     }
                 },
-                padGain = if (activeBankKit in kits.indices) kits[activeBankKit].padGain.getOrElse(selectedPad) { 1f } else 1f,
+                padGain = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padGain.getOrElse(selectedPad) { 1f } else 1f,
                 onGainChange = { v ->
-                    if (activeBankKit in kits.indices) {
-                        kits[activeBankKit].padGain[selectedPad] = v
+                    if (bankKitIdx() in kits.indices) {
+                        kits[bankKitIdx()].padGain[selectedPad] = v
                         nativeSlotsFor(selectedPad).forEach { DrumEngine.setGain(it, v) }
                         persistKits()
                     }
@@ -1901,23 +1930,24 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onKitCNext = { if (currentKitC < kits.lastIndex) currentKitC++ },
                 selectedPad = selectedPad,
                 // BUG FIX: read/write the kit for the CURRENTLY SELECTED BANK
-                // (activeBankKit), not always Bank A's currentKit — see the
-                // activeBankKit comment near bankMode for why.
-                padVolume = kits[activeBankKit].volumes[selectedPad],
-                padPitch = kits[activeBankKit].pitches[selectedPad],
+                // (bankKitIdx()), not always Bank A's currentKit — see the
+                // bankKitIdx() comment near bankMode for why.
+                padVolume = kits[bankKitIdx()].volumes[selectedPad],
+                padPitch = kits[bankKitIdx()].pitches[selectedPad],
 
 
                 onVolumeChange = {
-                    kits[activeBankKit].volumes[selectedPad] = it
+                    kits[bankKitIdx()].volumes[selectedPad] = it
                     persistKits()   // NEW: save immediately so it survives app close
                 },
 
                 onPitchChange = {
-                    kits[activeBankKit].pitches[selectedPad] = it
+                    kits[bankKitIdx()].pitches[selectedPad] = it
                     persistKits()   // NEW: save immediately so it survives app close
                 },
                 kits          = kits,
                 currentKit    = currentKit,
+                bankKitIdx    = bankKitIdx(),
                 onKitAdd = {
 
                     // ── NEW: user khud jo naya kit add karega uske pads
@@ -1962,7 +1992,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // ── NEW: live waveform/timer ────────────────────────────────────
                 playingPadUri       = playingPadUri,
                 playingDefaultResId = if (playingPadUri == null)
-                    kits[activeBankKit].sounds[selectedPad].takeIf { it > 0 } ?: 0
+                    kits[bankKitIdx()].sounds[selectedPad].takeIf { it > 0 } ?: 0
                 else 0,
                 playbackPositionMs  = playbackPositionMs,
                 playbackDurationMs  = playbackDurationMs,
@@ -2159,21 +2189,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
         when (topPanel) {
 
+            // BUG FIX: these three used to always read/write kits[currentKit]
+            // (Bank A) no matter which bank was actually selected — an
+            // import/crop-edit/library view while Bank B/C was active
+            // silently touched Bank A's (inaudible) kit instead of the one
+            // the user was looking at/hearing. Routed through bankKitIdx(),
+            // same fix pattern as the FX knobs and swap/clear/record.
             "IMPORT" -> {
+                val importKitIdx = bankKitIdx()
                 ImportScreen(
                     onClose = { topPanel = ""; importTargetPad = null },
-                    currentKit = currentKit,
+                    currentKit = importKitIdx,
                     targetPad = importTargetPad,
                     targetPadDefaultResId = importTargetPad?.let {
-                        kits[currentKit].sounds.getOrElse(it) { -1 }
+                        kits[importKitIdx].sounds.getOrElse(it) { -1 }
                     } ?: -1
                 )
             }
 
             "AUDIOS" -> {
+                val audiosKitIdx = bankKitIdx()
                 AudioListScreen(
-                    currentKit = currentKit,
-                    factoryResIds = kits[currentKit].sounds,
+                    currentKit = audiosKitIdx,
+                    factoryResIds = kits[audiosKitIdx].sounds,
                     onClose = { topPanel = "" }
                 )
             }
@@ -2185,10 +2223,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             }
 
             "EDIT" -> {
+                val editKitIdx = bankKitIdx()
                 WaveformEditorScreen(
-                    kitIndex = currentKit,
+                    kitIndex = editKitIdx,
                     padIndex = selectedPad,
-                    factoryResId = kits[currentKit].sounds.getOrElse(selectedPad) { -1 },
+                    factoryResId = kits[editKitIdx].sounds.getOrElse(selectedPad) { -1 },
                     onClose  = { topPanel = "" },
                     // Same one-tap import flow EQPanel's "IMPORT TO THIS PAD"
                     // already uses — no import logic duplicated.
@@ -2422,6 +2461,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     PadActionMenu(
         visible = showPadMenu,
+        // BUG FIX: onMix/onAddToEnd used to always target kits[currentKit]
+        // (Bank A) and only invalidate native slot t (0-7) — mixing/
+        // concatenating while Bank B/C was active silently wrote into Bank
+        // A's (inaudible) kit and never invalidated the native slot that was
+        // actually audible, so the result never seemed to apply. Routed
+        // through bankKitIdx()/nativeSlotsFor(), same fix pattern as swap.
         onMix = {
             showPadMenu = false
             // sourcePad/targetPad are 1-based pad numbers (1..8) from the drag
@@ -2429,24 +2474,25 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             val s = sourcePad - 1
             val t = targetPad - 1
             if (s in 0..7 && t in 0..7 && s != t) {
+                val kitIdx = bankKitIdx()
                 scope.launch {
                     val file = com.example.myapplication.ui.audio.PcmMixer.mixPads(
                         context  = context,
-                        kitIndex = currentKit,
+                        kitIndex = kitIdx,
                         padA     = s,
                         padB     = t,
-                        factoryResIds = kits[currentKit].sounds
+                        factoryResIds = kits[kitIdx].sounds
                     )
                     if (file != null) {
                         AudioRepository.assignRecordedAudio(
-                            kitIndex = currentKit,
+                            kitIndex = kitIdx,
                             padIndex = t,
                             file     = file
                         )
-                        DrumEngine.invalidatePad(t)
+                        nativeSlotsFor(t).forEach { DrumEngine.invalidatePad(it) }
                         if (selectedPad == t) updatePadDisplay(t)
                     } else {
-                        android.util.Log.w("MIX", "mixPads returned null for pads $s,$t in kit $currentKit")
+                        android.util.Log.w("MIX", "mixPads returned null for pads $s,$t in kit $kitIdx")
                     }
                 }
             }
@@ -2458,24 +2504,25 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             val s = sourcePad - 1
             val t = targetPad - 1
             if (s in 0..7 && t in 0..7 && s != t) {
+                val kitIdx = bankKitIdx()
                 scope.launch {
                     val file = com.example.myapplication.ui.audio.PcmMixer.concatPads(
                         context  = context,
-                        kitIndex = currentKit,
+                        kitIndex = kitIdx,
                         padA     = s,
                         padB     = t,
-                        factoryResIds = kits[currentKit].sounds
+                        factoryResIds = kits[kitIdx].sounds
                     )
                     if (file != null) {
                         AudioRepository.assignRecordedAudio(
-                            kitIndex = currentKit,
+                            kitIndex = kitIdx,
                             padIndex = t,
                             file     = file
                         )
-                        DrumEngine.invalidatePad(t)
+                        nativeSlotsFor(t).forEach { DrumEngine.invalidatePad(it) }
                         if (selectedPad == t) updatePadDisplay(t)
                     } else {
-                        android.util.Log.w("MIX", "concatPads returned null for pads $s,$t in kit $currentKit")
+                        android.util.Log.w("MIX", "concatPads returned null for pads $s,$t in kit $kitIdx")
                     }
                 }
             }

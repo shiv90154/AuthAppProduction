@@ -215,13 +215,14 @@ object KitRepository {
         return obj
     }
 
-    fun importBackup(obj: JSONObject) {
-        val ctx = appContext ?: return
-        // Validate the kit payload actually parses into real kit entries
-        // BEFORE writing anything — a malformed/truncated/incompatible-version
-        // backup must fail loudly instead of overwriting the currently saved
-        // kits with a string that later fails to parse in load() (which would
-        // silently wipe the whole kit list on the next read).
+    // Validates the kit payload actually parses into real kit entries WITHOUT
+    // writing anything — split out from importBackup() so BackupScreen's
+    // restore flow can validate every repository's payload up front before
+    // committing any of them, instead of committing kits first and only then
+    // discovering a later repository's payload is bad (which used to leave
+    // kits replaced by the backup while preferences/CC/MIDI maps stayed old
+    // — a hybrid, inconsistent restore).
+    fun validateBackupPayload(obj: JSONObject): String? {
         val kitsStr = if (obj.has(KEY_KITS)) obj.getString(KEY_KITS) else null
         if (kitsStr != null) {
             try {
@@ -231,6 +232,17 @@ object KitRepository {
                 throw IllegalStateException("Backup contains invalid kit data", e)
             }
         }
+        return kitsStr
+    }
+
+    fun importBackup(obj: JSONObject) {
+        val ctx = appContext ?: return
+        // Validate the kit payload actually parses into real kit entries
+        // BEFORE writing anything — a malformed/truncated/incompatible-version
+        // backup must fail loudly instead of overwriting the currently saved
+        // kits with a string that later fails to parse in load() (which would
+        // silently wipe the whole kit list on the next read).
+        val kitsStr = validateBackupPayload(obj)
         val edit = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (kitsStr != null) edit.putString(KEY_KITS, kitsStr)
         edit.putInt(KEY_LAST_SELECTED_KIT, obj.optInt(KEY_LAST_SELECTED_KIT, 0))

@@ -87,6 +87,15 @@ void AudioEngine::stop() {
 void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFrames,
                                 int channels, int sampleRate) {
     if (padIndex < 0 || padIndex >= kMaxPads) return;
+    // A malformed/corrupt import can report a bogus sample rate. onAudioReady
+    // computes playback rate as pitch * (buf.sampleRate / outputSampleRate_);
+    // sampleRate <= 0 makes that rate 0, so v.position never advances and the
+    // voice's end-of-sample check never trips — it plays frame 0 forever and
+    // never releases its slot, permanently leaking a voice out of the shared
+    // 64-voice pool. Reject the load outright rather than accept a buffer
+    // that can never finish playing; the pad simply keeps whatever (or no)
+    // audio it had before.
+    if (sampleRate <= 0) return;
 
     std::vector<float> stereo;
     stereo.reserve(numFrames * 2);
@@ -120,51 +129,115 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
 void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopExisting,
                               float lengthFraction, float pan, float gain) {
     if (padIndex < 0 || padIndex >= kMaxPads) return;
-    if (!buffers_[padIndex].loaded) return;
 
-    // Stop any currently-playing voice for this pad first — ensures
-    // retrigger always restarts from frame 0, never plays two instances.
-    // Skipped when stopExisting=false (per-pad "MIX" play mode), which lets
-    // repeated hits layer/overlap instead of cutting the previous one off.
-    //
-    // BUG FIX: this used to kill the voice INSTANTLY (ready=false right
-    // here), which cuts the waveform off wherever it happened to be
-    // mid-sample — almost never at a zero-crossing — producing an audible
-    // click/pop on every fast retrigger ("khich khich awaaz" on repeated
-    // hits). Instead of an instant kill, flag it `releasing`; the audio
-    // thread (onAudioReady) ramps its gain down over a few ms and only
-    // then frees the slot, so the cutoff is a fade, not a discontinuity.
-    if (stopExisting) {
-        for (auto &v : voices_) {
-            if (v.ready.load(std::memory_order_acquire) && v.padIndex == padIndex) {
-                v.releasing.store(true, std::memory_order_release);
+    // A pitch of exactly (or near) 0 makes onAudioReady's playback rate 0,
+    // which — like an invalid sample rate — freezes a voice on frame 0
+    // forever and leaks it out of the pool. Clamp to a safe minimum
+    // magnitude, preserving direction/sign.
+    if (pitch == 0.0f) {
+        pitch = 1.0f;
+    } else if (pitch > -0.01f && pitch < 0.01f) {
+        pitch = pitch < 0.0f ? -0.01f : 0.01f;
+    }
+
+    // Everything in this block touches buffers_[padIndex] and voices_, both
+    // of which onAudioReady reads/writes under bufferMutex_ every callback
+    // buffer. Locking here (a) makes the `.loaded` check below race-free
+    // against a concurrent loadPadBuffer(), and (b) serializes the
+    // stop+claim sequence below against a concurrent triggerPad() call for
+    // the same pad (two overlapping callers used to each pass the
+    // stop-check and independently claim a voice, defeating "ONE SHOT
+    // retrigger stops the previous hit"). Scoped to a block so the lock is
+    // released before the delay-tap scheduling below, which takes
+    // delayMutex_ — fireDelayTaps() (called from the audio thread) takes
+    // delayMutex_ first and bufferMutex_ second, so never holding both here
+    // at once avoids a lock-order inversion between the two threads.
+    bool loaded;
+    {
+        std::lock_guard<std::mutex> lock(bufferMutex_);
+        loaded = buffers_[padIndex].loaded;
+        if (loaded) {
+            // Stop any currently-playing voice for this pad first — ensures
+            // retrigger always restarts from frame 0, never plays two
+            // instances. Skipped when stopExisting=false (per-pad "MIX" play
+            // mode), which lets repeated hits layer/overlap instead of
+            // cutting the previous one off.
+            //
+            // BUG FIX: this used to kill the voice INSTANTLY (ready=false
+            // right here), which cuts the waveform off wherever it happened
+            // to be mid-sample — almost never at a zero-crossing —
+            // producing an audible click/pop on every fast retrigger
+            // ("khich khich awaaz" on repeated hits). Instead of an instant
+            // kill, flag it `releasing`; the audio thread (onAudioReady)
+            // ramps its gain down over a few ms and only then frees the
+            // slot, so the cutoff is a fade, not a discontinuity.
+            if (stopExisting) {
+                for (auto &v : voices_) {
+                    if (v.ready.load(std::memory_order_acquire) && v.padIndex == padIndex) {
+                        v.releasing.store(true, std::memory_order_release);
+                    }
+                }
+            }
+
+            // Claim a free voice, fully initialize it, THEN publish it as
+            // ready. Writing padIndex/position/volume/pitch happens-before
+            // the release store to `ready`, so the audio thread (which
+            // acquire-loads `ready`) never sees a half-written voice — this
+            // is what previously caused stray/overlapping wrong-sample
+            // glitches on fast multi-hits.
+            Voice *claimed = nullptr;
+            for (auto &v : voices_) {
+                bool expected = false;
+                if (v.active.compare_exchange_strong(expected, true)) {
+                    claimed = &v;
+                    break;
+                }
+            }
+
+            // Pool exhausted (64 simultaneous voices already playing, easily
+            // reached with MIX/MULTIPLAY layering across 3 banks) —
+            // previously the hit was just silently dropped. Steal the
+            // oldest currently-playing voice instead of losing the hit
+            // entirely. Safe to do under bufferMutex_: setting `ready`
+            // false first means onAudioReady (which only ever runs with
+            // this same mutex held) can't be mid-read of this voice while
+            // we overwrite it.
+            if (!claimed) {
+                uint64_t oldestSeq = UINT64_MAX;
+                for (auto &v : voices_) {
+                    if (!v.ready.load(std::memory_order_acquire)) continue;
+                    uint64_t seq = v.claimSeq.load(std::memory_order_relaxed);
+                    if (seq < oldestSeq) {
+                        oldestSeq = seq;
+                        claimed = &v;
+                    }
+                }
+                if (claimed) {
+                    claimed->ready.store(false, std::memory_order_release);
+                }
+            }
+
+            if (claimed) {
+                Voice &v = *claimed;
+                v.padIndex = padIndex;
+                v.position = 0.0;
+                v.volume.store(volume, std::memory_order_relaxed);
+                v.pitch.store(pitch, std::memory_order_relaxed);
+                v.lengthFraction.store(
+                    lengthFraction < 0.05f ? 0.05f : (lengthFraction > 1.0f ? 1.0f : lengthFraction),
+                    std::memory_order_relaxed);
+                v.pan.store(pan, std::memory_order_relaxed);
+                v.gain.store(gain, std::memory_order_relaxed);
+                v.releaseGain = 1.0f;
+                v.releasing.store(false, std::memory_order_release);
+                v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
+                                  std::memory_order_relaxed);
+                v.active.store(true, std::memory_order_release);
+                v.ready.store(true, std::memory_order_release);
             }
         }
     }
-
-    // Claim a free voice, fully initialize it, THEN publish it as ready.
-    // Writing padIndex/position/volume/pitch happens-before the release
-    // store to `ready`, so the audio thread (which acquire-loads `ready`)
-    // never sees a half-written voice — this is what previously caused
-    // stray/overlapping wrong-sample glitches on fast multi-hits.
-    for (auto &v : voices_) {
-        bool expected = false;
-        if (v.active.compare_exchange_strong(expected, true)) {
-            v.padIndex = padIndex;
-            v.position = 0.0;
-            v.volume.store(volume, std::memory_order_relaxed);
-            v.pitch.store(pitch, std::memory_order_relaxed);
-            v.lengthFraction.store(
-                lengthFraction < 0.05f ? 0.05f : (lengthFraction > 1.0f ? 1.0f : lengthFraction),
-                std::memory_order_relaxed);
-            v.pan.store(pan, std::memory_order_relaxed);
-            v.gain.store(gain, std::memory_order_relaxed);
-            v.releaseGain = 1.0f;
-            v.releasing.store(false, std::memory_order_release);
-            v.ready.store(true, std::memory_order_release);
-            break;
-        }
-    }
+    if (!loaded) return;
 
     // Schedule delay taps if delay is on for this pad
     if (!delayEnabled_.load(std::memory_order_relaxed)) return;
@@ -204,6 +277,15 @@ void AudioEngine::setPadVolume(int padIndex, float volume) {
 }
 
 void AudioEngine::setPadPitch(int padIndex, float pitch) {
+    // Same zero-pitch guard as triggerPad() — a live pitch-knob drag can
+    // reach exactly 0 without ever going through triggerPad, which would
+    // otherwise freeze the affected voice's playback position forever (see
+    // triggerPad's comment on why rate==0 leaks a voice permanently).
+    if (pitch == 0.0f) {
+        pitch = 1.0f;
+    } else if (pitch > -0.01f && pitch < 0.01f) {
+        pitch = pitch < 0.0f ? -0.01f : 0.01f;
+    }
     for (auto &v : voices_) {
         if (v.ready.load(std::memory_order_acquire) && v.padIndex == padIndex) {
             v.pitch.store(pitch, std::memory_order_relaxed);
@@ -303,8 +385,15 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
     auto it = delayTaps_.begin();
     while (it != delayTaps_.end()) {
         if (it->triggerAtFrame < windowEnd) {
-            // Find a free voice and trigger
+            // Find a free voice and trigger. buffers_[pad].loaded is written
+            // (under bufferMutex_) by loadPadBuffer() from a different
+            // thread whenever a kit/pad reloads — reading it here without
+            // the same lock was a data race. This never nests with
+            // triggerPad()'s locking (which never holds bufferMutex_ and
+            // delayMutex_ at once), so acquiring bufferMutex_ here too can't
+            // deadlock against it.
             int pad = it->padIndex;
+            std::lock_guard<std::mutex> bufLock(bufferMutex_);
             if (pad >= 0 && pad < kMaxPads && buffers_[pad].loaded) {
                 for (auto &v : voices_) {
                     bool expected = false;
@@ -323,6 +412,8 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
                         v.lengthFraction.store(1.0f, std::memory_order_relaxed);
                         v.pan.store(it->pan, std::memory_order_relaxed);
                         v.gain.store(it->gain, std::memory_order_relaxed);
+                        v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
+                                          std::memory_order_relaxed);
                         v.ready.store(true, std::memory_order_release);
                         break;
                     }

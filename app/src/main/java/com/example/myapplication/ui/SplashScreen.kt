@@ -3,9 +3,10 @@ package com.example.myapplication.ui
 import androidx.compose.animation.core.EaseOutCubic
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -16,13 +17,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.delay
+import com.example.myapplication.R
 
 /**
  * Branded startup screen — shown for a short beat before handing off to
@@ -56,15 +58,14 @@ fun SplashScreen() {
                 .alpha(alpha)
                 .scale(scale)
         ) {
-            // 8-dot mark echoing the pad grid, LED-lit in the brand color
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(4) { i -> SplashDot(delayMs = i * 70) }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    repeat(4) { i -> SplashDot(delayMs = 280 + i * 70) }
-                }
-            }
+            Image(
+                painter = painterResource(R.drawable.logo),
+                contentDescription = "ARUN SPD 30 logo",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .size(140.dp)
+                    .border(1.dp, LedActive.copy(alpha = 0.35f))
+            )
 
             Spacer(Modifier.height(26.dp))
 
@@ -93,23 +94,3 @@ fun SplashScreen() {
 const val SOCIAL_YOUTUBE_URL   = "https://youtube.com/@arunspd30?si=qimBMd6E13OYr4Wy"
 const val SOCIAL_INSTAGRAM_URL = "https://www.instagram.com/arunprachiofficial?igsh=cDdqcXgzbmM2NTcz"
 const val SOCIAL_WHATSAPP_URL  = "https://wa.me/918319277458"
-
-@Composable
-private fun SplashDot(delayMs: Int) {
-    var lit by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay(delayMs.toLong())
-        lit = true
-    }
-    val dotAlpha by animateFloatAsState(
-        targetValue = if (lit) 1f else 0.25f,
-        animationSpec = tween(220),
-        label = "dot"
-    )
-    Box(
-        modifier = Modifier
-            .size(14.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .background(LedActive.copy(alpha = dotAlpha))
-    )
-}

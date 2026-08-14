@@ -4,16 +4,19 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -55,6 +58,17 @@ fun KitListScreen(
     // Track which item is highlighted in this screen (starts at currentKit)
     var highlighted by remember { mutableStateOf(currentKit) }
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentKit)
+
+    // NEW: search — with up to 200 kits, finding one by scrolling is slow.
+    // Filters by name (case-insensitive substring), but keeps each row's
+    // REAL index into the full `kits` list — onSelect/onRename/onExportPatch
+    // all operate on that real index, not a position within the filtered
+    // results, so renaming/selecting/exporting still hits the right kit.
+    var searchQuery by remember { mutableStateOf("") }
+    val filteredKits = remember(kits, searchQuery) {
+        if (searchQuery.isBlank()) kits.withIndex().toList()
+        else kits.withIndex().filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }
+    }
 
     // Full screen dark overlay
     Box(
@@ -106,6 +120,46 @@ fun KitListScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
+            // ── Search ────────────────────────────────────────────────────────
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xFF1A1A1A))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🔍", fontSize = 12.sp, modifier = Modifier.padding(end = 8.dp))
+                    Box(Modifier.weight(1f)) {
+                        if (searchQuery.isEmpty()) {
+                            Text("Search kits…", color = Color(0xFF555555), fontSize = 12.sp)
+                        }
+                        BasicTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            singleLine = true,
+                            textStyle = TextStyle(color = Color.White, fontSize = 12.sp),
+                            cursorBrush = SolidColor(BtnActive),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (searchQuery.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clip(RoundedCornerShape(50))
+                                .background(Color(0xFF2A2A2A))
+                                .pointerInput(Unit) { detectTapGestures { searchQuery = "" } },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("✕", color = Color(0xFFAAAAAA), fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             // ── Kit List ──────────────────────────────────────────────────────
             LazyColumn(
                 state  = listState,
@@ -117,7 +171,7 @@ fun KitListScreen(
                 contentPadding    = PaddingValues(8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                itemsIndexed(kits) { index, kit ->
+                items(filteredKits, key = { it.index }) { (index, kit) ->
                     KitListItem(
                         kit        = kit,
                         index      = index,
@@ -135,6 +189,17 @@ fun KitListScreen(
                             onExportPatch(index)
                         }
                     )
+                }
+
+                if (filteredKits.isEmpty()) {
+                    item {
+                        Text(
+                            "No kits match \"$searchQuery\"",
+                            color = Color(0xFF666666), fontSize = 11.sp,
+                            modifier = Modifier.fillMaxWidth().padding(20.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
             }
 

@@ -64,6 +64,21 @@ fun LoadKitScreen(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+
+        // BUG FIX: without this, the folder-tree permission (and every
+        // child file URI resolved from it) only lasts for the current
+        // process — the pads load fine right now, but on the next app
+        // restart, resolving these URIs throws SecurityException and the
+        // kit silently comes back with no sound assigned. Same root cause
+        // class as the ImportScreen.kt audio-picker fix.
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // Not fatal — the kit still loads for this session either way.
+        }
+
         isScanning = true
         status = "Scanning folder…"
         isError = false

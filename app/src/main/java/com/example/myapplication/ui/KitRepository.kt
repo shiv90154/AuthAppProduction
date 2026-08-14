@@ -217,8 +217,22 @@ object KitRepository {
 
     fun importBackup(obj: JSONObject) {
         val ctx = appContext ?: return
+        // Validate the kit payload actually parses into real kit entries
+        // BEFORE writing anything — a malformed/truncated/incompatible-version
+        // backup must fail loudly instead of overwriting the currently saved
+        // kits with a string that later fails to parse in load() (which would
+        // silently wipe the whole kit list on the next read).
+        val kitsStr = if (obj.has(KEY_KITS)) obj.getString(KEY_KITS) else null
+        if (kitsStr != null) {
+            try {
+                val arr = JSONArray(kitsStr)
+                for (i in 0 until arr.length()) fromJson(arr.getJSONObject(i))
+            } catch (e: Exception) {
+                throw IllegalStateException("Backup contains invalid kit data", e)
+            }
+        }
         val edit = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
-        if (obj.has(KEY_KITS)) edit.putString(KEY_KITS, obj.getString(KEY_KITS))
+        if (kitsStr != null) edit.putString(KEY_KITS, kitsStr)
         edit.putInt(KEY_LAST_SELECTED_KIT, obj.optInt(KEY_LAST_SELECTED_KIT, 0))
         edit.apply()
     }

@@ -3,14 +3,14 @@ package com.example.myapplication.ui
 import android.content.Context
 
 /**
- * PreferencesRepository — persists global app preferences like BPM and metronome
- * state so they survive an app restart instead of resetting to defaults.
+ * PreferencesRepository — persists global app preferences like BPM and
+ * exclusive mode so they survive an app restart instead of resetting to
+ * defaults.
  */
 object PreferencesRepository {
 
     private const val PREFS_NAME = "preferences"
     private const val KEY_BPM = "bpm"
-    private const val KEY_METRONOME_ON = "metronome_on"
     private const val KEY_EXCLUSIVE_MODE = "exclusive_mode"
     private const val KEY_LOOP_ENABLED = "loop_enabled"
     private const val KEY_DELAY_ENABLED = "delay_enabled"
@@ -40,12 +40,6 @@ object PreferencesRepository {
     }
 
     fun loadBpm(): Int = prefs()?.getInt(KEY_BPM, 120) ?: 120
-
-    fun saveMetronomeOn(metronomeOn: Boolean) {
-        prefs()?.edit()?.putBoolean(KEY_METRONOME_ON, metronomeOn)?.apply()
-    }
-
-    fun loadMetronomeOn(): Boolean = prefs()?.getBoolean(KEY_METRONOME_ON, false) ?: false
 
     fun saveExclusiveMode(enabled: Boolean) {
         prefs()?.edit()?.putBoolean(KEY_EXCLUSIVE_MODE, enabled)?.apply()
@@ -105,13 +99,21 @@ object PreferencesRepository {
         prefs()?.edit()?.putInt(KEY_KIT_B, index)?.apply()
     }
 
-    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 0) ?: 0
+    // NEW: defaults to a genuinely blank kit slot (index 25 = "EMPTY 026",
+    // the first of the pre-generated blank kits), not kit index 0 which is
+    // a real factory kit — Bank B should start empty until the user
+    // explicitly points it at a loaded kit, not silently inherit Bank A's
+    // default sounds.
+    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 25) ?: 25
 
     fun saveKitC(index: Int) {
         prefs()?.edit()?.putInt(KEY_KIT_C, index)?.apply()
     }
 
-    fun loadKitC(): Int = prefs()?.getInt(KEY_KIT_C, 0) ?: 0
+    // Same reasoning as loadKitB() — starts blank (index 26 = "EMPTY 027",
+    // the second blank slot, so B and C don't default to the SAME blank kit
+    // and inadvertently look "linked" to each other).
+    fun loadKitC(): Int = prefs()?.getInt(KEY_KIT_C, 26) ?: 26
 
     fun saveMidiChannel(channel: Int) {
         prefs()?.edit()?.putInt(KEY_MIDI_CHANNEL, channel)?.apply()
@@ -124,7 +126,6 @@ object PreferencesRepository {
     fun exportBackup(): org.json.JSONObject {
         val obj = org.json.JSONObject()
         obj.put(KEY_BPM, loadBpm())
-        obj.put(KEY_METRONOME_ON, loadMetronomeOn())
         obj.put(KEY_EXCLUSIVE_MODE, loadExclusiveMode())
         obj.put(KEY_LOOP_ENABLED, loadLoopEnabled())
         obj.put(KEY_DELAY_ENABLED, loadDelayEnabled())
@@ -142,7 +143,6 @@ object PreferencesRepository {
 
     fun importBackup(obj: org.json.JSONObject) {
         if (obj.has(KEY_BPM)) saveBpm(obj.getInt(KEY_BPM))
-        if (obj.has(KEY_METRONOME_ON)) saveMetronomeOn(obj.getBoolean(KEY_METRONOME_ON))
         if (obj.has(KEY_EXCLUSIVE_MODE)) saveExclusiveMode(obj.getBoolean(KEY_EXCLUSIVE_MODE))
         if (obj.has(KEY_LOOP_ENABLED)) saveLoopEnabled(obj.getBoolean(KEY_LOOP_ENABLED))
         if (obj.has(KEY_DELAY_ENABLED)) saveDelayEnabled(obj.getBoolean(KEY_DELAY_ENABLED))

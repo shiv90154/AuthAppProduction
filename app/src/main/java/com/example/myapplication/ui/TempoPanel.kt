@@ -30,13 +30,14 @@ private val TempoTextWht   = Color(0xFFEEEEEE)
 @Composable
 fun TempoPanel(
     bpm: Int,
-    metronomeOn: Boolean,
     loopEnabled: Boolean,
-    totalBeats: Int,             // NEW: cumulative beat counter
     onBpmChange: (Int) -> Unit,
-    onMetronomeToggle: (Boolean) -> Unit,
     onLoopChange: (Boolean) -> Unit,
-    onResetTotal: () -> Unit,    // NEW: reset counter
+    // CHOKE quick-toggle — same Exclusive Mode state the dedicated CHOKE
+    // panel (next to CROP) uses; detailed level/pad-group assignment still
+    // lives there, this is just live-performance quick access.
+    exclusiveMode: Boolean = false,
+    onExclusiveChange: (Boolean) -> Unit = {},
     // NEW: global tempo-synced playback-rate multiplier
     speed: Float = 1f,
     onSpeedChange: (Float) -> Unit = {},
@@ -131,40 +132,6 @@ fun TempoPanel(
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
 
-            // ── Total Beats Counter ───────────────────────────────────────
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(TempoPanelBg)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text("TOTAL", color = TempoTextWht, fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
-                    val bar   = if (bpm > 0) totalBeats / 4 + 1 else 1
-                    val beat  = totalBeats % 4 + 1
-                    Text(
-                        "Bar $bar  Beat $beat  ($totalBeats hits)",
-                        color = TempoAccent, fontSize = 8.sp
-                    )
-                }
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color(0xFF2A2A2A))
-                        .clickable(remember { MutableInteractionSource() }, null) { onResetTotal() }
-                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("RESET", color = TempoTextMuted, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-
-            Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
-
             // ── Loop toggle ───────────────────────────────────────────────
             ToggleRow(
                 label    = "LOOP",
@@ -176,17 +143,17 @@ fun TempoPanel(
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
 
-            // ── Metronome toggle ──────────────────────────────────────────
+            // ── Choke quick-toggle ──────────────────────────────────────────
             ToggleRow(
-                label    = "METRONOME",
-                subtitle = if (metronomeOn) "Click is playing" else "Click is off",
-                enabled  = metronomeOn,
+                label    = "CHOKE",
+                subtitle = if (exclusiveMode) "Choke groups active" else "Choke is off",
+                enabled  = exclusiveMode,
                 color    = TempoGreen,
-                onClick  = { onMetronomeToggle(!metronomeOn) }
+                onClick  = { onExclusiveChange(!exclusiveMode) }
             )
 
             Text(
-                "Loop and metronome sync with BPM — affects all pads",
+                "Loop syncs with BPM — affects all pads. Choke levels are set in the CHOKE panel.",
                 color = TempoTextMuted, fontSize = 8.sp, modifier = Modifier.fillMaxWidth()
             )
 

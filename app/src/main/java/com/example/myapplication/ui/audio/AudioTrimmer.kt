@@ -325,6 +325,14 @@ private suspend fun extractAudio(
                 muxer.writeSampleData(muxerTrack, buffer, bufInfo)
                 extractor.advance()
             }
+        } catch (e: Exception) {
+            // BUG FIX: on a mid-extraction failure (malformed video, no
+            // samples in the selected window, full disk) the partially
+            // written outFile used to be left behind on disk forever —
+            // an orphaned temp file every time extraction failed, since the
+            // caller only ever sees the thrown exception, never the File.
+            outFile.delete()
+            throw e
         } finally {
             if (muxerStarted) {
                 try { muxer.stop() } catch (e: Exception) { /* nothing was written */ }

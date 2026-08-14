@@ -43,11 +43,20 @@ object WaveformGenerator {
         try {
             val afd = context.resources.openRawResourceFd(resId) ?: return@withContext emptyList()
             val extractor = MediaExtractor()
-            extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-            afd.close()
-            val raw = decodeAmplitudesFromExtractor(extractor)
-            extractor.release()
-            if (raw.isEmpty()) emptyList() else downsample(raw, barCount)
+            // BUG FIX: extractor.release() used to only run after
+            // decodeAmplitudesFromExtractor() returned normally — a malformed
+            // factory resource (or a bad setDataSource call) threw straight
+            // past it, leaking the MediaExtractor same as the codec leaks
+            // fixed elsewhere in this file. try/finally guarantees release()
+            // on every exit path.
+            try {
+                extractor.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                afd.close()
+                val raw = decodeAmplitudesFromExtractor(extractor)
+                if (raw.isEmpty()) emptyList() else downsample(raw, barCount)
+            } finally {
+                extractor.release()
+            }
         } catch (e: Exception) {
             emptyList()
         }
@@ -56,10 +65,16 @@ object WaveformGenerator {
     /** Decodes the full audio track into per-chunk RMS amplitude values (0f..1f). */
     private fun decodeAmplitudes(context: Context, uri: Uri): List<Float> {
         val extractor = MediaExtractor()
-        extractor.setDataSource(context, uri, null)
-        val result = decodeAmplitudesFromExtractor(extractor)
-        extractor.release()
-        return result
+        // BUG FIX: same leak as extractAmplitudesFromRaw above — release()
+        // used to only run after a normal return, so an exception from
+        // setDataSource/decodeAmplitudesFromExtractor on a malformed
+        // user-imported file leaked the extractor.
+        try {
+            extractor.setDataSource(context, uri, null)
+            return decodeAmplitudesFromExtractor(extractor)
+        } finally {
+            extractor.release()
+        }
     }
 
     private fun decodeAmplitudesFromExtractor(extractor: MediaExtractor): List<Float> {

@@ -78,12 +78,15 @@ object LicenseApi {
             doOutput = true
             setRequestProperty("Content-Type", "application/json")
         }
-        OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
-        val status = conn.responseCode
-        val stream = if (status in 200..299) conn.inputStream else conn.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
-        conn.disconnect()
-        return status to text
+        try {
+            OutputStreamWriter(conn.outputStream).use { it.write(body.toString()) }
+            val status = conn.responseCode
+            val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
+            return status to text
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun get(urlStr: String): Pair<Int, String> {
@@ -92,11 +95,14 @@ object LicenseApi {
             connectTimeout = TIMEOUT_MS
             readTimeout = TIMEOUT_MS
         }
-        val status = conn.responseCode
-        val stream = if (status in 200..299) conn.inputStream else conn.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
-        conn.disconnect()
-        return status to text
+        try {
+            val status = conn.responseCode
+            val stream = if (status in 200..299) conn.inputStream else conn.errorStream
+            val text = stream?.bufferedReader()?.use { it.readText() } ?: "{}"
+            return status to text
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun urlEncode(s: String): String =

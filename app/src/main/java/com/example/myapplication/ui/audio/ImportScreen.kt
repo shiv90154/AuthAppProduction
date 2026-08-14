@@ -68,10 +68,29 @@ fun ImportScreen(
     val maxDurationMs by remember { derivedStateOf { (maxDurationSec * 1000).toLong() } }
 
     // ── Audio file picker ─────────────────────────────────────────────────────
+    // BUG FIX: this used to be ActivityResultContracts.GetContent(), which
+    // Android documents as a *transient* grant — it can never be made to
+    // survive a process restart no matter what. The picked audio's URI gets
+    // stored in AudioRepository (persisted to disk) expecting to be re-opened
+    // on the NEXT app launch, but that permission was already gone by then —
+    // openInputStream() throws SecurityException, the pad silently has no
+    // sound, which reads exactly like "load hone ke baad save nahi hota,
+    // restart karne par default ho jata hai". OpenDocument() is the SAF
+    // contract that actually supports persistable permissions (granted via
+    // takePersistableUriPermission below).
     val audioLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        } catch (e: SecurityException) {
+            // Some providers (rare) don't grant persistable access at all —
+            // the import still works for this session, it just won't
+            // survive a restart. Not fatal, so don't block the import.
+        }
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(context, uri)
@@ -143,7 +162,7 @@ fun ImportScreen(
         if (granted) {
             permissionDenied = false
             when (pendingLaunch) {
-                "audio" -> audioLauncher.launch("audio/*")
+                "audio" -> audioLauncher.launch(arrayOf("audio/*"))
                 "video" -> videoLauncher.launch("video/*")
             }
             pendingLaunch = null

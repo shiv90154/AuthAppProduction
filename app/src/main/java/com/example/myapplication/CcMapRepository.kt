@@ -48,6 +48,18 @@ object CcMapRepository {
 
     fun save(target: String, ccNumber: Int) {
         val obj = loadRaw()
+        // BUG FIX: a CC number is only ever dispatched to ONE target (the
+        // first match in OctapadScreen's onControlChange `when`), so leaving
+        // a stale mapping from a previous target to this same CC number
+        // meant the newly-learned target would show as mapped in the UI but
+        // silently never fire — the older target kept winning every time.
+        // One CC -> at most one target, so re-learning it here must strip it
+        // from wherever it used to point.
+        TARGETS.forEach { existingTarget ->
+            if (existingTarget != target && obj.optInt(existingTarget, DEFAULTS[existingTarget] ?: -1) == ccNumber) {
+                obj.remove(existingTarget)
+            }
+        }
         obj.put(target, ccNumber)
         prefs()?.edit()?.putString(KEY_MAPPINGS, obj.toString())?.apply()
     }

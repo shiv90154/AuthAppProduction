@@ -8,8 +8,12 @@ import android.media.MediaMuxer
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -31,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import com.example.myapplication.ui.BtnActive
 import com.example.myapplication.ui.PanelBg
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -39,7 +44,6 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -47,11 +51,18 @@ import kotlin.math.sqrt
  *
  * Features:
  *  - Full waveform display of the assigned pad audio
- *  - Pinch-to-zoom (horizontal) and scroll via drag
- *  - Crop handles: drag left/right edges to set start/end trim
- *  - Delete region: tap "DEL REGION" to cut a selected middle section
+ *  - One unified gesture recognizer on the canvas (see WaveformEditorCanvas):
+ *    exactly one finger drags out a region (crop keep-range or delete
+ *    cut-range, same interaction either way), two or more fingers pinch to
+ *    zoom / pan. The two never overlap or fight over the same touch — that
+ *    was the root cause of the old "unnatural"/laggy feel.
+ *  - Crop: single-finger drag draws the kept region directly
+ *  - Delete region: tap "DEL REGION", then single-finger drag to select a
+ *    middle section to cut
  *  - Millisecond-precision display
- *  - Save: writes trimmed PCM back to a new file and updates AudioRepository
+ *  - Autosave: crop/delete edits commit the instant the gesture ends
+ *    (finger lift), written back to a new file + AudioRepository
+ *    automatically — no explicit "Save" button, no artificial delay
  *
  * @param kitIndex    current active kit
  * @param padIndex    which pad (0-7) is being edited
@@ -67,10 +78,13 @@ fun WaveformEditorScreen(
     // leaving Crop mode — reuses the exact same one-tap file-manager
     // import flow the FX panel's "IMPORT TO THIS PAD" already uses
     // (OctapadScreen sets importTargetPad + opens the Import screen).
-    onPickNewSound: () -> Unit = {}
+    onPickNewSound: () -> Unit = {},
+    // NEW: wipes whatever sound (custom or factory) this pad has, leaving
+    // it silent — same "add + clear sound, both right here in Crop" flow
+    // requested instead of having to dig through other screens to unassign.
+    onClearSound: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     val audio = remember { AudioRepository.audioForPad(kitIndex, padIndex) }
     // Display name to save the edited file under when there's no custom
@@ -111,6 +125,18 @@ fun WaveformEditorScreen(
     // Saving state
     var isSaving by remember { mutableStateOf(false) }
     var saveMsg by remember { mutableStateOf<String?>(null) }
+    // Set true by any user-driven crop/delete/reset change so the autosave
+    // effect below knows there's something worth persisting — the initial
+    // PCM load also writes cropStartMs/cropEndMs (full range) and must NOT
+    // trigger a save of its own.
+    var hasUserEdited by remember { mutableStateOf(false) }
+    // Bumped exactly once per completed gesture that changed the crop/delete
+    // region (see WaveformEditorCanvas's onRegionCommit) — the autosave
+    // LaunchedEffect below is keyed on this instead of on cropStartMs/
+    // cropEndMs/etc. directly, so it fires exactly once right when the
+    // user's finger lifts, not on every intermediate value a live drag
+    // writes and not after some arbitrary idle timeout.
+    var commitTick by remember { mutableStateOf(0) }
 
     // ── Load PCM on entry ──────────────────────────────────────────────────────
     // BUG FIX: this used to hard-block editing entirely whenever the pad had
@@ -147,6 +173,69 @@ fun WaveformEditorScreen(
             } finally {
                 isLoading = false
             }
+        }
+    }
+
+    // ── Autosave crop/delete edits ─────────────────────────────────────────────
+    // Replaces the old "SAVE EDITS" button. Live-dragging a region only ever
+    // updates local UI state (cheap, instant, no encode) — this effect is
+    // keyed on commitTick, which WaveformEditorCanvas bumps exactly once,
+    // exactly when a region-drag gesture ends (finger lift), so the actual
+    // encode+persist (MediaCodec AAC encode, AudioRepository, DrumEngine
+    // reload) runs once per completed edit with no artificial delay, not on
+    // a fixed idle timeout and never on intermediate drag frames.
+    LaunchedEffect(commitTick) {
+        if (!hasUserEdited || pcmResult == null) return@LaunchedEffect
+        saveMsg = null
+        isSaving = true
+        try {
+            val result = pcmResult!!
+            val editedFile = applyEdits(
+                context = context,
+                pcm = result,
+                durationMs = durationMs,
+                cropStartMs = cropStartMs,
+                cropEndMs = cropEndMs,
+                deleteStartMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteStartMs else -1L,
+                deleteEndMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteEndMs else -1L,
+                originalName = sourceName
+            )
+            AudioRepository.assignRecordedAudio(
+                kitIndex = kitIndex,
+                padIndex = padIndex,
+                file = editedFile
+            )
+            // BUG FIX: every other caller of assignRecordedAudio (Mix,
+            // Add-To-End, mic recording) invalidates the native pad buffer
+            // right after — this call site was the one exception, so the
+            // edited/cropped audio was saved to the repository but the pad
+            // kept playing the OLD pre-edit sound until something unrelated
+            // (a kit switch, an app restart) forced a reload.
+            DrumEngine.invalidatePad(padIndex)
+            DrumEngine.loadPad(context, kitIndex, padIndex, factoryResId)
+            saveMsg = "Saved"
+            // Mark clean BEFORE touching crop/delete state below — those
+            // resets are themselves keys of this same effect, and clearing
+            // the flag first means the relaunch they trigger bails out
+            // immediately instead of re-encoding the just-saved audio again.
+            hasUserEdited = false
+            // Refresh pcm + amplitudes for the newly saved audio, and reset
+            // the crop/delete range to match its (now full) extent.
+            val newPcm = PcmDecoder.decode(context, Uri.fromFile(editedFile))
+            if (newPcm != null) {
+                pcmResult = newPcm
+                amplitudes = computeAmplitudes(newPcm, bars = 512)
+                cropStartMs = 0L
+                cropEndMs = (newPcm.pcm.size.toLong() / newPcm.channels * 1000L / newPcm.sampleRate)
+                deleteStartMs = -1L
+                deleteEndMs = -1L
+                zoom = 1f
+                scrollFrac = 0f
+            }
+        } catch (e: Exception) {
+            saveMsg = "Error: ${e.message}"
+        } finally {
+            isSaving = false
         }
     }
 
@@ -206,18 +295,36 @@ fun WaveformEditorScreen(
 
             Spacer(Modifier.height(8.dp))
 
-            // ── Pick new sound — always available, even before any audio has
-            // loaded, so a pad with nothing assigned isn't a dead end anymore.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1A1A1A))
-                    .pointerInput(Unit) { detectTapGestures { onPickNewSound() } }
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center
+            // ── Pick new sound / Clear sound — always available, even before
+            // any audio has loaded, so a pad with nothing assigned isn't a
+            // dead end anymore, and clearing doesn't need a detour to
+            // another screen either.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("PICK NEW SOUND FOR THIS PAD", color = BtnActive, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                Box(
+                    modifier = Modifier
+                        .weight(2f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF1A1A1A))
+                        .pointerInput(Unit) { detectTapGestures { onPickNewSound() } }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("PICK NEW SOUND", color = BtnActive, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFF2A1010))
+                        .pointerInput(Unit) { detectTapGestures { onClearSound() } }
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("CLEAR", color = Color(0xFFFF6666), fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -283,12 +390,26 @@ fun WaveformEditorScreen(
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF0A0A0A)),
-                        onCropStartChange = { cropStartMs = it.coerceIn(0L, cropEndMs - 10L) },
-                        onCropEndChange = { cropEndMs = it.coerceIn(cropStartMs + 10L, durationMs) },
+                        // Same drag-to-select interaction as onDeleteRegion below —
+                        // every drag fully replaces both edges in one motion
+                        // instead of nudging whichever handle was pixel-closer,
+                        // so there's no stale edge left over from a prior edit.
+                        onCropRegion = { s, e ->
+                            val lo = s.coerceIn(0L, durationMs)
+                            val hi = e.coerceAtLeast(lo + 10L).coerceAtMost(durationMs)
+                            cropStartMs = lo
+                            cropEndMs = hi
+                            hasUserEdited = true
+                        },
                         onDeleteRegion = { s, e ->
                             deleteStartMs = s.coerceIn(cropStartMs, cropEndMs)
                             deleteEndMs = e.coerceIn(cropStartMs, cropEndMs)
+                            hasUserEdited = true
                         },
+                        // Fires exactly once when a region-drag gesture ends —
+                        // this, not a value-change debounce, is what actually
+                        // triggers the autosave (see the commitTick effect above).
+                        onRegionCommit = { commitTick++ },
                         onZoomScroll = { scale, offsetFrac ->
                             zoom = (zoom * scale).coerceIn(1f, 32f)
                             scrollFrac = offsetFrac.coerceIn(0f, 1f - 1f / zoom)
@@ -326,11 +447,15 @@ fun WaveformEditorScreen(
                     Spacer(Modifier.height(8.dp))
 
                     // ── Action buttons ──────────────────────────────────────────
+                    // No separate "Save Edits" button — crop/delete edits commit
+                    // automatically the instant a region-drag gesture ends (see
+                    // the commitTick-keyed LaunchedEffect above). Reset is the
+                    // only explicit action left, and bumps commitTick itself
+                    // since it doesn't go through the canvas gesture.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        // Reset
                         Box(
                             modifier = Modifier
                                 .weight(1f)
@@ -345,6 +470,14 @@ fun WaveformEditorScreen(
                                         zoom = 1f
                                         scrollFrac = 0f
                                         saveMsg = null
+                                        // Persist the reset too — otherwise the pad would
+                                        // keep playing whatever crop was last autosaved
+                                        // while the UI shows a misleadingly "full" range.
+                                        // commitTick must be bumped explicitly here since
+                                        // autosave is now gesture-driven, not triggered by
+                                        // cropStartMs/cropEndMs simply changing value.
+                                        hasUserEdited = true
+                                        commitTick++
                                     }
                                 }
                                 .padding(vertical = 12.dp),
@@ -353,94 +486,14 @@ fun WaveformEditorScreen(
                             Text("RESET", color = Color(0xFF888888), fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold)
                         }
-
-                        // Save
-                        Box(
-                            modifier = Modifier
-                                .weight(2f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(
-                                    if (isSaving) Color(0xFF003322)
-                                    else Color(0xFF005544)
-                                )
-                                .pointerInput(isSaving) {
-                                    detectTapGestures {
-                                        // BUG FIX: this used to also require audio != null,
-                                        // so Save was unreachable for factory-kit pads even
-                                        // though the waveform/crop UI above now loads and
-                                        // displays them fine — the exact same "looks like it
-                                        // works but doesn't actually do anything" bug as the
-                                        // load-blocking one above. pcmResult != null is the
-                                        // real readiness check (true for both custom and
-                                        // factory audio now).
-                                        if (isSaving || pcmResult == null) return@detectTapGestures
-                                        scope.launch {
-                                            isSaving = true
-                                            saveMsg = null
-                                            try {
-                                                val result = pcmResult!!
-                                                val editedFile = applyEdits(
-                                                    context = context,
-                                                    pcm = result,
-                                                    durationMs = durationMs,
-                                                    cropStartMs = cropStartMs,
-                                                    cropEndMs = cropEndMs,
-                                                    deleteStartMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteStartMs else -1L,
-                                                    deleteEndMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteEndMs else -1L,
-                                                    originalName = sourceName
-                                                )
-                                                AudioRepository.assignRecordedAudio(
-                                                    kitIndex = kitIndex,
-                                                    padIndex = padIndex,
-                                                    file = editedFile
-                                                )
-                                                // BUG FIX: every other caller of assignRecordedAudio
-                                                // (Mix, Add-To-End, mic recording) invalidates the
-                                                // native pad buffer right after — this call site was
-                                                // the one exception, so the edited/cropped audio was
-                                                // saved to the repository but the pad kept playing the
-                                                // OLD pre-edit sound until something unrelated (a kit
-                                                // switch, an app restart) happened to force a reload.
-                                                // "Save" now actually takes effect immediately.
-                                                DrumEngine.invalidatePad(padIndex)
-                                                DrumEngine.loadPad(context, kitIndex, padIndex, factoryResId)
-                                                saveMsg = "Saved!"
-                                                // refresh pcm + amplitudes for the new audio
-                                                val newPcm = PcmDecoder.decode(context, Uri.fromFile(editedFile))
-                                                if (newPcm != null) {
-                                                    pcmResult = newPcm
-                                                    amplitudes = computeAmplitudes(newPcm, bars = 512)
-                                                    cropStartMs = 0L
-                                                    cropEndMs = (newPcm.pcm.size.toLong() / newPcm.channels * 1000L / newPcm.sampleRate)
-                                                    deleteStartMs = -1L
-                                                    deleteEndMs = -1L
-                                                    zoom = 1f
-                                                    scrollFrac = 0f
-                                                }
-                                            } catch (e: Exception) {
-                                                saveMsg = "Error: ${e.message}"
-                                            } finally {
-                                                isSaving = false
-                                            }
-                                        }
-                                    }
-                                }
-                                .padding(vertical = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                if (isSaving) "Saving…" else "SAVE EDITS",
-                                color = BtnActive, fontSize = 12.sp, fontWeight = FontWeight.Bold
-                            )
-                        }
                     }
 
-                    // Save message
-                    if (saveMsg != null) {
+                    // Autosave status
+                    if (isSaving || saveMsg != null) {
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            saveMsg!!,
-                            color = if (saveMsg!!.startsWith("Error")) Color(0xFFFF6666)
+                            if (isSaving) "Saving…" else saveMsg!!,
+                            color = if (!isSaving && saveMsg!!.startsWith("Error")) Color(0xFFFF6666)
                                     else Color(0xFF66FFAA),
                             fontSize = 11.sp,
                             modifier = Modifier.fillMaxWidth(),
@@ -464,6 +517,12 @@ fun WaveformEditorScreen(
 
 // ── Waveform Canvas ───────────────────────────────────────────────────────────
 
+// Which multi-touch interaction the canvas's single gesture recognizer has
+// committed to for the gesture currently in progress. Owning both
+// interactions in one recognizer (see below) is what guarantees REGION and
+// TRANSFORM can never both react to the same touch stream at once.
+private enum class CanvasGesture { NONE, REGION, TRANSFORM }
+
 @Composable
 private fun WaveformEditorCanvas(
     amplitudes: FloatArray,
@@ -476,128 +535,171 @@ private fun WaveformEditorCanvas(
     deleteEndMs: Long,
     editMode: String,
     modifier: Modifier,
-    onCropStartChange: (Long) -> Unit,
-    onCropEndChange: (Long) -> Unit,
+    onCropRegion: (Long, Long) -> Unit,
     onDeleteRegion: (Long, Long) -> Unit,
+    onRegionCommit: () -> Unit,
     onZoomScroll: (Float, Float) -> Unit
 ) {
-    // Track canvas width in px for coordinate math
+    // Track canvas width in px for coordinate math. Written only from layout
+    // (onGloballyPositioned) — a second, redundant write of the same value
+    // used to also happen on every single draw frame inside the Canvas draw
+    // lambda; removed, since layout size doesn't change per frame.
     var canvasWidthPx by remember { mutableStateOf(1f) }
 
-    // For delete drag tracking
-    var dragStartPx by remember { mutableStateOf(-1f) }
-    var dragEndPx by remember { mutableStateOf(-1f) }
-
-    // BUG FIX: cropStartMs/cropEndMs/zoom/scrollFrac all change DURING the
-    // very drag gestures below (onCropStartChange/onCropEndChange/onZoomScroll
-    // write straight back into them) — with those values as pointerInput keys,
-    // every single pixel of movement changed the key, which cancelled and
-    // restarted the whole gesture-detector coroutine mid-drag. That reset
-    // `activeHandle` back to "" on each restart, and since the pointer was
-    // still down (previousPressed already true), the "which handle did we
-    // grab" re-detection never re-ran either — so a crop handle would move
-    // at most one pixel before the drag silently stopped responding. Same
-    // problem for pinch-zoom: restarting detectTransformGestures mid-pinch
-    // drops the gesture and needs fingers lifted and replaced to continue.
-    // Fix: read live values via rememberUpdatedState instead of restart keys,
-    // so the gesture loops start once per mode and never get torn down by
-    // the state changes they themselves cause.
+    // ROOT CAUSE of the reported "unnatural"/laggy crop feel and broken
+    // two-finger zoom: this canvas used to run TWO separate `pointerInput`
+    // gesture detectors stacked on the same node — one for pinch/pan
+    // (detectTransformGestures) and a second, independent one for the
+    // region drag — and BOTH received and reacted to the exact same raw
+    // touch stream at the same time. detectTransformGestures fires its
+    // callback for any pointer count, including exactly one finger (zoom
+    // stays 1, but pan is nonzero), so a plain single-finger crop/delete
+    // drag was ALSO being read as a pan/scroll simultaneously — and the
+    // reverse was just as broken: during a genuine two-finger pinch, the
+    // region detector's "first pointer" tracking kept moving the crop/
+    // delete boundary too. Two independent recognizers fighting over one
+    // touch stream explains every symptom: janky pinch/pan, a boundary
+    // that visibly fought the finger, and a final crop that didn't match
+    // what was on screen because the boundary got corrupted mid-pinch.
+    //
+    // Fix: exactly one recognizer below. It decides per-gesture, from the
+    // live pointer count, whether this is a region drag or a pinch/pan,
+    // and once it commits to one it never evaluates the other against the
+    // same events.
     val liveDurationMs by rememberUpdatedState(durationMs)
     val liveZoom by rememberUpdatedState(zoom)
     val liveScrollFrac by rememberUpdatedState(scrollFrac)
-    val liveCropStartMs by rememberUpdatedState(cropStartMs)
-    val liveCropEndMs by rememberUpdatedState(cropEndMs)
+
+    // In-flight inertia from a released pan, if any. A fresh touch always
+    // cancels it immediately — standard scroll-view behaviour: touching the
+    // content stops any residual momentum dead.
+    val flingScope = rememberCoroutineScope()
+    var flingJob by remember { mutableStateOf<Job?>(null) }
 
     Canvas(
         modifier = modifier
             .onGloballyPositioned { canvasWidthPx = it.size.width.toFloat() }
-            // Two-finger pinch-to-zoom + pan-to-scroll — the standard
-            // interaction pattern in crop/waveform editors (Splice,
-            // GarageBand, Soundtrap, CapCut, etc.): pinch to zoom in/out,
-            // drag with two fingers to scroll left/right through the zoomed
-            // waveform. `pan` used to be received and silently discarded —
-            // there was no way to actually scroll once zoomed in past 1x.
-            // Key is Unit (start once), reads live state via rememberUpdatedState.
-            .pointerInput(Unit) {
-                detectTransformGestures { centroid, pan, scale, _ ->
-                    val z = liveZoom
-                    val newZoom = (z * scale).coerceIn(1f, 32f)
-                    // Keep the pinch centroid anchored to the same waveform
-                    // position as the zoom level changes.
-                    val centroidFrac = centroid.x / canvasWidthPx / z + liveScrollFrac
-                    val zoomedScroll = centroidFrac - centroid.x / canvasWidthPx / newZoom
-                    // Content follows the fingers: dragging right reveals
-                    // earlier content (scrollFrac decreases), same direction
-                    // convention as scrolling any horizontal list by touch.
-                    val panFrac = pan.x / canvasWidthPx / newZoom
-                    val newScroll = (zoomedScroll - panFrac)
-                        .coerceIn(0f, (1f - 1f / newZoom).coerceAtLeast(0f))
-                    onZoomScroll(newZoom / z, newScroll)
-                }
-            }
-            // Tap/drag for crop handles or delete region — only restart when
-            // the MODE itself changes (CROP vs DELETE genuinely need
-            // different gesture logic), not on every value the drag updates.
+            // Single recognizer for BOTH region-select (crop/delete) and
+            // pinch-zoom/pan — see the ROOT CAUSE note above for why this
+            // must never be two separate detectors. Restarts only when
+            // editMode changes, not on every value the gesture itself
+            // writes back (cropStartMs, zoom, ...), which would tear down
+            // and restart the detector mid-drag.
             .pointerInput(editMode) {
-                if (editMode == "CROP") {
-                    // drag left edge = crop start, right edge = crop end
-                    // Simple horizontal drag: determine which handle is closer
-                    awaitPointerEventScope {
-                        var activeHandle = ""  // "START" or "END"
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull() ?: continue
-                            val px = change.position.x
+                awaitEachGesture {
+                    flingJob?.cancel()
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var gesture = CanvasGesture.NONE
+                    val dragStartPx = down.position.x
+                    var regionChanged = false
+                    var lastEventTimeMs = down.uptimeMillis
+                    var scrollVelocityFracPerMs = 0f
 
-                            if (change.pressed && !change.previousPressed) {
-                                // Determine closest handle in px
-                                val startPx = msToCanvasPx(liveCropStartMs, liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx)
-                                val endPx   = msToCanvasPx(liveCropEndMs,   liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx)
-                                activeHandle = if (abs(px - startPx) < abs(px - endPx)) "START" else "END"
-                            }
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
 
-                            if (change.pressed) {
-                                val ms = canvasPxToMs(px, liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx)
-                                when (activeHandle) {
-                                    "START" -> onCropStartChange(ms)
-                                    "END"   -> onCropEndChange(ms)
-                                }
-                                change.consume()
+                        if (pressed.size >= 2) {
+                            // Two-plus fingers: pinch-zoom + pan. Owns the
+                            // gesture exclusively from here — even if this
+                            // started as a single-finger region drag a
+                            // moment ago, that partial edit simply isn't
+                            // committed (see the REGION/regionChanged check
+                            // after the loop: `gesture` is TRANSFORM now).
+                            gesture = CanvasGesture.TRANSFORM
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val z = liveZoom
+                            val newZoom = (z * zoomChange).coerceIn(1f, 32f)
+                            val centroid = event.calculateCentroid()
+                            // Keep the pinch centroid anchored to the same
+                            // waveform position as the zoom level changes.
+                            val centroidFrac = pxToFrac(centroid.x, z, liveScrollFrac, canvasWidthPx)
+                            val zoomedScroll = centroidFrac - pxToFrac(centroid.x, newZoom, 0f, canvasWidthPx)
+                            // Content follows the fingers: dragging right
+                            // reveals earlier content (scrollFrac decreases),
+                            // same convention as scrolling any list by touch.
+                            val panFrac = panChange.x / canvasWidthPx / newZoom
+                            val newScroll = (zoomedScroll - panFrac)
+                                .coerceIn(0f, (1f - 1f / newZoom).coerceAtLeast(0f))
+
+                            val now = event.changes[0].uptimeMillis
+                            val dt = (now - lastEventTimeMs).coerceAtLeast(1L)
+                            // Zero out (not just "leave stale") on a still
+                            // frame, so a deliberate pause-then-release
+                            // never produces a phantom fling.
+                            scrollVelocityFracPerMs = if (zoomChange == 1f && panChange == Offset.Zero) {
+                                0f
                             } else {
-                                activeHandle = ""
+                                (newScroll - liveScrollFrac) / dt
                             }
-                        }
-                    }
-                } else {
-                    // Delete mode: drag to select region
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull() ?: continue
-                            val px = change.position.x
+                            lastEventTimeMs = now
 
-                            if (change.pressed && !change.previousPressed) {
-                                dragStartPx = px
-                                dragEndPx = px
-                            } else if (change.pressed) {
-                                dragEndPx = px
-                                val s = canvasPxToMs(
-                                    dragStartPx.coerceIn(0f, canvasWidthPx),
-                                    liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx
-                                )
-                                val e = canvasPxToMs(
-                                    dragEndPx.coerceIn(0f, canvasWidthPx),
-                                    liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx
-                                )
-                                onDeleteRegion(minOf(s, e), maxOf(s, e))
-                                change.consume()
+                            if (zoomChange != 1f || panChange != Offset.Zero) {
+                                onZoomScroll(newZoom / z, newScroll)
+                            }
+                            event.changes.forEach { it.consume() }
+                        } else if (gesture != CanvasGesture.TRANSFORM) {
+                            // Exactly one finger, and this gesture hasn't
+                            // become a pinch — region-select. Every drag
+                            // fully redefines both edges (touch point to
+                            // current point), the exact same interaction for
+                            // CROP and DELETE alike, so there's never a
+                            // stale edge left over from a previous edit.
+                            gesture = CanvasGesture.REGION
+                            val change = pressed[0]
+                            val s = canvasPxToMs(dragStartPx.coerceIn(0f, canvasWidthPx), liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx)
+                            val e = canvasPxToMs(change.position.x.coerceIn(0f, canvasWidthPx), liveDurationMs, liveZoom, liveScrollFrac, canvasWidthPx)
+                            val lo = minOf(s, e)
+                            val hi = maxOf(s, e)
+                            if (editMode == "CROP") onCropRegion(lo, hi) else onDeleteRegion(lo, hi)
+                            regionChanged = true
+                            change.consume()
+                        }
+                        // gesture == TRANSFORM but exactly 1 finger remains
+                        // (the other just lifted): deliberately falls
+                        // through and does nothing until the last finger
+                        // also lifts — NOT reinterpreted as a fresh region
+                        // drag, which would jump the boundary to wherever
+                        // that finger happens to be.
+                    }
+
+                    when (gesture) {
+                        CanvasGesture.REGION -> if (regionChanged) onRegionCommit()
+                        CanvasGesture.TRANSFORM -> {
+                            // Natural inertia: a fast pan release keeps
+                            // gliding and decelerates instead of stopping
+                            // dead, matching native scroll/zoom feel.
+                            // Capped, clamped to valid scroll bounds, and
+                            // killed instantly by the next touch.
+                            val v0 = (scrollVelocityFracPerMs * 1000f).coerceIn(-4f, 4f)
+                            val z = liveZoom
+                            val maxScroll = (1f - 1f / z).coerceAtLeast(0f)
+                            if (abs(v0) > 0.02f && maxScroll > 0f) {
+                                flingJob = flingScope.launch {
+                                    var v = v0
+                                    var pos = liveScrollFrac
+                                    var lastFrame = 0L
+                                    while (abs(v) > 0.01f && pos in 0f..maxScroll) {
+                                        withFrameNanos { t ->
+                                            if (lastFrame != 0L) {
+                                                val dt = (t - lastFrame) / 1_000_000_000f
+                                                pos = (pos + v * dt).coerceIn(0f, maxScroll)
+                                                v *= (1f - 4f * dt).coerceIn(0f, 1f)
+                                                onZoomScroll(1f, pos)
+                                            }
+                                            lastFrame = t
+                                        }
+                                    }
+                                }
                             }
                         }
+                        CanvasGesture.NONE -> Unit
                     }
                 }
             }
     ) {
-        canvasWidthPx = size.width
         val midY = size.height / 2f
         val barCount = amplitudes.size
 
@@ -675,20 +777,30 @@ private fun WaveformEditorCanvas(
     }
 }
 
-// ── Coordinate helpers ────────────────────────────────────────────────────────
+// ── Coordinate transform ──────────────────────────────────────────────────────
+// Single source of truth for canvas-px <-> normalized-time-fraction <-> ms,
+// used identically by the pinch/pan handler, the region-drag handler, and
+// the draw pass below. Previously the pinch handler had its own inline copy
+// of this same math (duplicated, not reused) — exactly the kind of
+// redundant transform that lets gesture math and rendering drift apart.
+
+private fun pxToFrac(px: Float, zoom: Float, scrollFrac: Float, width: Float): Float {
+    if (width <= 0f || zoom <= 0f) return scrollFrac
+    return (px / width) / zoom + scrollFrac
+}
+
+private fun fracToPx(frac: Float, zoom: Float, scrollFrac: Float, width: Float): Float {
+    return (frac - scrollFrac) * zoom * width
+}
 
 private fun msToCanvasPx(ms: Long, durationMs: Long, zoom: Float, scrollFrac: Float, width: Float): Float {
     if (durationMs <= 0) return 0f
-    val frac = ms.toFloat() / durationMs
-    val visibleFrac = 1f / zoom
-    return ((frac - scrollFrac) / visibleFrac) * width
+    return fracToPx(ms.toFloat() / durationMs, zoom, scrollFrac, width)
 }
 
 private fun canvasPxToMs(px: Float, durationMs: Long, zoom: Float, scrollFrac: Float, width: Float): Long {
     if (width <= 0) return 0L
-    val visibleFrac = 1f / zoom
-    val frac = (px / width) * visibleFrac + scrollFrac
-    return (frac * durationMs).toLong().coerceIn(0L, durationMs)
+    return (pxToFrac(px, zoom, scrollFrac, width) * durationMs).toLong().coerceIn(0L, durationMs)
 }
 
 // ── Amplitude computation ─────────────────────────────────────────────────────
@@ -746,21 +858,35 @@ private suspend fun applyEdits(
     val delStartFrame   = if (deleteStartMs >= 0) msToFrame(deleteStartMs) else -1L
     val delEndFrame     = if (deleteStartMs >= 0) msToFrame(deleteEndMs)   else -1L
 
-    // Build output PCM by stitching segments
-    val outSamples = mutableListOf<Short>()
-
-    fun addFrameRange(fromFrame: Long, toFrame: Long) {
+    // Build output PCM by stitching segments. PERF: this used to build a
+    // MutableList<Short>, boxing every single sample (hundreds of thousands
+    // to millions on a multi-second clip) — with autosave now running after
+    // nearly every crop drag, that boxing/GC churn was the main source of
+    // encode latency. A preallocated ShortArray + arraycopy is a straight
+    // primitive-memory copy instead.
+    fun rangeIndices(fromFrame: Long, toFrame: Long): IntRange {
         val fromIdx = (fromFrame * channels).toInt().coerceIn(0, pcm.pcm.size)
         val toIdx   = (toFrame   * channels).toInt().coerceIn(0, pcm.pcm.size)
-        for (i in fromIdx until toIdx) outSamples.add(pcm.pcm[i])
+        return fromIdx until toIdx
     }
 
-    if (delStartFrame >= 0 && delEndFrame > delStartFrame) {
+    val ranges = if (delStartFrame >= 0 && delEndFrame > delStartFrame) {
         // Crop start → delete start, then delete end → crop end
-        addFrameRange(cropStartFrame, delStartFrame.coerceIn(cropStartFrame, cropEndFrame))
-        addFrameRange(delEndFrame.coerceIn(cropStartFrame, cropEndFrame), cropEndFrame)
+        listOf(
+            rangeIndices(cropStartFrame, delStartFrame.coerceIn(cropStartFrame, cropEndFrame)),
+            rangeIndices(delEndFrame.coerceIn(cropStartFrame, cropEndFrame), cropEndFrame)
+        )
     } else {
-        addFrameRange(cropStartFrame, cropEndFrame)
+        listOf(rangeIndices(cropStartFrame, cropEndFrame))
+    }.filter { it.last >= it.first }
+
+    val totalSamples = ranges.sumOf { it.last - it.first + 1 }
+    val outSamples = ShortArray(totalSamples)
+    var writeIdx = 0
+    for (range in ranges) {
+        val len = range.last - range.first + 1
+        System.arraycopy(pcm.pcm, range.first, outSamples, writeIdx, len)
+        writeIdx += len
     }
 
     // Encode to AAC m4a using MediaCodec
@@ -769,7 +895,7 @@ private suspend fun applyEdits(
         "edit_${originalName}_${System.currentTimeMillis()}.m4a"
     )
     encodePcmToM4a(
-        samples   = outSamples.toShortArray(),
+        samples   = outSamples,
         channels  = channels,
         sampleRate = sampleRate,
         outFile   = outFile

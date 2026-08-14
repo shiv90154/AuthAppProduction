@@ -103,6 +103,11 @@ Java_com_example_myapplication_NativeBridge_loadPadAudio(
         JNIEnv *env, jobject thiz, jint padIndex, jshortArray pcm,
         jint channels, jint sampleRate)
 {
+    // channels/sampleRate ultimately come from decoding a user-supplied audio
+    // file (see DrumEngine.kt / PcmDecoder) — a malformed/corrupt import could
+    // in principle report channels <= 0. Guard against that here since
+    // `len / channels` below would otherwise be an integer division by zero.
+    if (channels <= 0) return;
     jsize len = env->GetArrayLength(pcm);
     std::vector<int16_t> buffer(len);
     env->GetShortArrayRegion(pcm, 0, len, buffer.data());

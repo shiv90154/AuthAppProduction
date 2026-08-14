@@ -219,36 +219,47 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
         }
     } ?: throw IllegalStateException("Could not open backup file")
 
-    val root = backupJson ?: throw IllegalStateException("backup.json missing from zip")
-
-    root.optJSONObject("kits")?.let { KitRepository.importBackup(it) }
-    root.optJSONObject("preferences")?.let { PreferencesRepository.importBackup(it) }
-    if (root.has("ccMap")) CcMapRepository.importBackup(root.getString("ccMap"))
-    if (root.has("midiNoteMap")) MidiLearnRepository.importBackup(root.getString("midiNoteMap"))
-
-    var restoredCount = 0
-    val audiosJson = root.optJSONArray("audios")
-    if (audiosJson != null) {
-        val items = mutableListOf<AudioItem>()
-        for (i in 0 until audiosJson.length()) {
-            val obj = audiosJson.getJSONObject(i)
-            val zipEntry = obj.optString("zipEntry", "")
-            val file = if (zipEntry.isNotEmpty()) extractedFiles[zipEntry] else null
-            if (file != null) {
-                val item = AudioItem(
-                    id = obj.getLong("id"),
-                    name = obj.getString("name"),
-                    uri = Uri.fromFile(file),
-                    durationMs = obj.getLong("durationMs")
-                )
-                item.assignedPad = obj.optInt("assignedPad", -1)
-                item.assignedKit = obj.optInt("assignedKit", 0)
-                items.add(item)
-                restoredCount++
-            }
-        }
-        AudioRepository.replaceAll(items)
+    val root = backupJson ?: run {
+        // Nothing usable was extracted — don't leave the audio files behind.
+        extractedFiles.values.forEach { it.delete() }
+        throw IllegalStateException("backup.json missing from zip")
     }
 
-    return restoredCount
+    try {
+        root.optJSONObject("kits")?.let { KitRepository.importBackup(it) }
+        root.optJSONObject("preferences")?.let { PreferencesRepository.importBackup(it) }
+        if (root.has("ccMap")) CcMapRepository.importBackup(root.getString("ccMap"))
+        if (root.has("midiNoteMap")) MidiLearnRepository.importBackup(root.getString("midiNoteMap"))
+
+        var restoredCount = 0
+        val audiosJson = root.optJSONArray("audios")
+        if (audiosJson != null) {
+            val items = mutableListOf<AudioItem>()
+            for (i in 0 until audiosJson.length()) {
+                val obj = audiosJson.getJSONObject(i)
+                val zipEntry = obj.optString("zipEntry", "")
+                val file = if (zipEntry.isNotEmpty()) extractedFiles[zipEntry] else null
+                if (file != null) {
+                    val item = AudioItem(
+                        id = obj.getLong("id"),
+                        name = obj.getString("name"),
+                        uri = Uri.fromFile(file),
+                        durationMs = obj.getLong("durationMs")
+                    )
+                    item.assignedPad = obj.optInt("assignedPad", -1)
+                    item.assignedKit = obj.optInt("assignedKit", 0)
+                    items.add(item)
+                    restoredCount++
+                }
+            }
+            AudioRepository.replaceAll(items)
+        }
+
+        return restoredCount
+    } catch (e: Exception) {
+        // A partially/incompatible backup (e.g. invalid kit data) must not
+        // leave orphaned extracted audio files behind on disk.
+        extractedFiles.values.forEach { it.delete() }
+        throw e
+    }
 }

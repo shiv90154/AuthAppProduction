@@ -57,7 +57,20 @@ class MidiManagerHelper(
 
             midiManager.openDevice(
                 deviceInfo,
-                { device ->
+                onOpened@{ device ->
+
+                    // BUG FIX: MidiManager.OnDeviceOpenedListener can be
+                    // called with a null device if opening failed (device
+                    // unplugged mid-open, permission revoked, etc.) — this
+                    // used to be dereferenced unconditionally below, which
+                    // would crash with an NPE instead of just skipping that
+                    // device. openDevice() is a plain (non-inline) Java SDK
+                    // method, so this must be a local return via an explicit
+                    // label, not a bare `return`.
+                    if (device == null) {
+                        Log.d("MIDI_TEST", "Device failed to open — skipping")
+                        return@onOpened
+                    }
 
                     Log.d(
                         "MIDI_TEST",

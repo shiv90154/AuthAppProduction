@@ -70,7 +70,19 @@ fun MidiLearnScreen(
             MidiLearnRepository.save(pad, note)
             learningPad = null
         }
-        onDispose { MidiEventBus.onLearnAssigned = null }
+        onDispose {
+            MidiEventBus.onLearnAssigned = null
+            // BUG FIX: previously only the X-button/Cancel taps cleared this,
+            // so leaving the screen any other way (DONE while still
+            // "listening", or topPanel changing out from under this
+            // composable) left CcLearnState.listeningForTarget stuck set.
+            // OctapadScreen's onControlChange handler is global and stays
+            // registered after this screen closes, so the next CC message
+            // anywhere in the app would get silently consumed as a learn
+            // instead of acting normally — clearing here on every dispose
+            // path guarantees it can't get stuck.
+            CcLearnState.listeningForTarget.value = null
+        }
     }
 
     // ── CC (knob/button/pad) mappings: Volume, Pitch, EQ, Patch, Edit, Save,

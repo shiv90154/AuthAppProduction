@@ -69,16 +69,17 @@ fun RightPanel(
     onRecordClick: () -> Unit,
     onOpenEdit: () -> Unit = {},
     onImportToPad: () -> Unit = {},
+    // NEW: EDIT MODE — round button below DLY. When on, tapping any pad
+    // opens a contextual edit menu (Clear Sound / Add Sound) instead of
+    // playing it — see OctapadScreen's editModeOn gate in onPadHit().
+    editModeOn: Boolean = false,
+    onEditModeChange: (Boolean) -> Unit = {},
     onOpenMapMidi: () -> Unit = {},
     onOpenLoadKit: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenImportPatch: () -> Unit = {},
     bpm: Int = 120,
-    metronomeOn: Boolean = false,
-    totalBeats: Int = 0,
     onBpmChange: (Int) -> Unit = {},
-    onMetronomeToggle: (Boolean) -> Unit = {},
-    onResetTotal: () -> Unit = {},
 
     // Delay — now surfaced inside the FX panel (EQPanel), not a standalone panel
     delayEnabled: Boolean = false,
@@ -120,9 +121,12 @@ fun RightPanel(
     onGainChange: (Float) -> Unit = {},
 
     // A/B/C Bank — bankMode is a string containing any subset of "ABC";
-    // onBankModeToggle(letter) flips that one letter's membership.
+    // NEW: single-select (tapping A/B/C plays ONLY that bank, replacing
+    // whatever was active) + a separate ALL button (A+B+C together) —
+    // onBankModeSelect sets bankMode directly rather than toggling one
+    // letter's membership in a multi-select set.
     bankMode: String = "A",
-    onBankModeToggle: (Char) -> Unit = {},
+    onBankModeSelect: (String) -> Unit = {},
     kitBName: String = "",
     onKitBPrev: () -> Unit = {},
     onKitBNext: () -> Unit = {},
@@ -138,6 +142,9 @@ fun RightPanel(
     var showEqPanel  by remember { mutableStateOf(false) }
     var showMusicPanel by remember { mutableStateOf(false) }
     var showTempoPanel by remember { mutableStateOf(false) }
+    // NEW: CHOKE now has its own dedicated panel/button next to CROP,
+    // instead of living buried inside FX behind EXCLUSIVE MODE.
+    var showChokePanel by remember { mutableStateOf(false) }
 
     // Same proportions the original fixed dp values had relative to the
     // 190dp main column (220/200/170), now scaled off the responsive
@@ -160,14 +167,8 @@ fun RightPanel(
                 width = eqPanelWidth,
                 visible = showEqPanel,
                 selectedPad = selectedPad,
-                exclusiveMode = exclusiveMode,
-                onExclusiveChange = onExclusiveChange,
                 velocityOn = velocityOn,
                 onVelocityChange = onVelocityChange,
-                allPadChokeGroups = allPadChokeGroups,
-                onToggleChokeGroup = onToggleChokeGroup,
-                activeChokeLevel = activeChokeLevel,
-                onSelectActiveChokeLevel = onSelectActiveChokeLevel,
                 isRecording = isRecording,
                 onRecordClick = onRecordClick,
                 masterLevel = masterLevel,
@@ -201,6 +202,25 @@ fun RightPanel(
             )
         }
 
+        // ── Choke Panel — dedicated top-level panel next to CROP ───────────────
+        AnimatedVisibility(
+            visible = showChokePanel,
+            enter   = slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(220)) + fadeIn(tween(220)),
+            exit    = slideOutHorizontally(targetOffsetX  = { -it }, animationSpec = tween(180)) + fadeOut(tween(180))
+        ) {
+            ChokePanel(
+                width = eqPanelWidth,
+                visible = showChokePanel,
+                exclusiveMode = exclusiveMode,
+                onExclusiveChange = onExclusiveChange,
+                allPadChokeGroups = allPadChokeGroups,
+                onToggleChokeGroup = onToggleChokeGroup,
+                activeChokeLevel = activeChokeLevel,
+                onSelectActiveChokeLevel = onSelectActiveChokeLevel,
+                onClose = { showChokePanel = false }
+            )
+        }
+
         AnimatedVisibility(
             visible = showTempoPanel,
             enter   = slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(220)) + fadeIn(tween(220)),
@@ -209,13 +229,11 @@ fun RightPanel(
             TempoPanel(
                 width = tempoPanelWidth,
                 bpm = bpm,
-                metronomeOn = metronomeOn,
                 loopEnabled = loopEnabled,           // MOVED from EQPanel
-                totalBeats = totalBeats,             // NEW: pass total beats counter
                 onBpmChange = onBpmChange,
-                onMetronomeToggle = onMetronomeToggle,
                 onLoopChange = onLoopChange,         // MOVED from EQPanel
-                onResetTotal = onResetTotal,         // NEW: reset callback
+                exclusiveMode = exclusiveMode,       // NEW: CHOKE quick-toggle
+                onExclusiveChange = onExclusiveChange,
                 speed = speed,
                 onSpeedChange = onSpeedChange,
                 padPlayMode = padPlayMode,           // MOVED from EQ/FX panel
@@ -293,14 +311,25 @@ fun RightPanel(
                 modifier = Modifier.fillMaxWidth()
             )
             CtrlBtnRow(
-                labels = listOf("CROP"),
+                labels = listOf("CROP", "CHOKE"),
                 active = activeBtn,
                 onSelect = { label ->
                     activeBtn = label
                     showEqPanel = false
                     showMusicPanel = false
                     showTempoPanel = false
-                    onOpenEdit()   // open WaveformEditorScreen
+                    showChokePanel = false
+                    when (label) {
+                        "CROP" -> onOpenEdit()   // open WaveformEditorScreen
+                        "CHOKE" -> {
+                            showChokePanel = true
+                            // Choke groups do nothing without Exclusive Mode on, and it
+                            // used to require a separate manual tap inside the panel —
+                            // turn it on the moment CHOKE is opened so the level/group
+                            // picker (gated on exclusiveMode below) is usable immediately.
+                            onExclusiveChange(true)
+                        }
+                    }
                 }
             )
 
@@ -347,6 +376,7 @@ fun RightPanel(
                                 showEqPanel = false
                                 showMusicPanel = false
                                 showTempoPanel = false
+                                showChokePanel = false
                                 onOpenLoadKit()
                             }
                         }
@@ -372,24 +402,28 @@ fun RightPanel(
                             showEqPanel = !showEqPanel
                             showMusicPanel = false
                             showTempoPanel = false
+                            showChokePanel = false
                         }
 
                         "LOOP" ->{
                             showTempoPanel = !showTempoPanel
                             showEqPanel = false
                             showMusicPanel = false
+                            showChokePanel = false
                         }
 
                         "SETTINGS" ->{
                             showMusicPanel = !showMusicPanel
                             showEqPanel = false
                             showTempoPanel = false
+                            showChokePanel = false
                         }
 
                         else->{
                             showEqPanel = false
                             showMusicPanel = false
                             showTempoPanel = false
+                            showChokePanel = false
                         }
                     }
                 }
@@ -479,6 +513,7 @@ fun RightPanel(
                                                 showEqPanel = true
                                                 showMusicPanel = false
                                                 showTempoPanel = false
+                                                showChokePanel = false
                                             }
                                         )
                                     },
@@ -488,6 +523,29 @@ fun RightPanel(
                                     text = "DLY",
                                     color = if (delayEnabled) Color.Black else Color(0xFFCCCCCC),
                                     fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            Spacer(Modifier.height(6.dp))
+
+                            // NEW: EDIT MODE — round button, right below DLY.
+                            // While on, tapping any pad opens a contextual
+                            // Clear/Add-Sound menu instead of playing it.
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(50))
+                                    .background(if (editModeOn) Color(0xFFFFB74D) else Color(0xFF3A3A3A))
+                                    .pointerInput(Unit) {
+                                        detectTapGestures { onEditModeChange(!editModeOn) }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "EDIT",
+                                    color = if (editModeOn) Color.Black else Color(0xFFCCCCCC),
+                                    fontSize = 7.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
@@ -518,26 +576,75 @@ fun RightPanel(
             // was taking up vertical space the panel doesn't have room for
             // now that scrolling is gone.
 
-            // ── A/B/C Bank selector — each is an independent toggle; the pad
-            // plays every bank whose letter is currently active, layered.
+            // ── A/B/C Bank selector — A/B/C are single-select (tapping one
+            // plays ONLY that bank), plus two explicit combos: A+B and ALL
+            // (A+B+C). Split into two rows — "BANK A/B/C" + "A+B"/"ALL" all
+            // in one row was too cramped for this panel's width.
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 listOf('A', 'B', 'C').forEach { letter ->
-                    val selected = letter in bankMode
+                    val selected = bankMode == letter.toString()
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .clip(RoundedCornerShape(6.dp))
                             .background(if (selected) BtnActive else BtnBg)
-                            .pointerInput(Unit) { detectTapGestures { onBankModeToggle(letter) } }
+                            .pointerInput(Unit) { detectTapGestures { onBankModeSelect(letter.toString()) } }
                             .padding(vertical = 6.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
                             "BANK $letter",
                             color = if (selected) Color.Black else Color(0xFFCCCCCC),
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // NEW: A+B — plays Bank A and Bank B together, C stays off.
+                run {
+                    val abSelected = bankMode == "AB"
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (abSelected) BtnActive else BtnBg)
+                            .pointerInput(Unit) { detectTapGestures { onBankModeSelect("AB") } }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "A+B",
+                            color = if (abSelected) Color.Black else Color(0xFFCCCCCC),
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                run {
+                    val allSelected = bankMode == "ABC"
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (allSelected) BtnActive else BtnBg)
+                            .pointerInput(Unit) { detectTapGestures { onBankModeSelect("ABC") } }
+                            .padding(vertical = 6.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "ALL",
+                            color = if (allSelected) Color.Black else Color(0xFFCCCCCC),
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -663,6 +770,7 @@ fun RightPanel(
                                 showEqPanel = false
                                 showMusicPanel = false
                                 showTempoPanel = false
+                                showChokePanel = false
                                 onOpenKitList()
                             }
                         }

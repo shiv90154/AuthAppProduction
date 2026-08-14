@@ -39,14 +39,11 @@ private val EqTextWht   = Color(0xFFEEEEEE)
 fun EQPanel(
     visible: Boolean,
     selectedPad: Int = 0,          // NEW: display which pad these settings apply to
-    exclusiveMode: Boolean,
-    onExclusiveChange: (Boolean) -> Unit,
+    // NOTE: exclusiveMode + choke levels moved out to their own dedicated
+    // ChokePanel.kt (a top-level CHOKE button next to CROP) — used to live
+    // buried in here behind an EXCLUSIVE MODE toggle, three taps deep.
     velocityOn: Boolean = true,
     onVelocityChange: (Boolean) -> Unit = {},
-    allPadChokeGroups: List<List<Int>> = List(8) { emptyList() },
-    onToggleChokeGroup: (Int, Int) -> Unit = { _, _ -> },
-    activeChokeLevel: Int = 0,
-    onSelectActiveChokeLevel: (Int) -> Unit = {},
     isRecording: Boolean,
     onRecordClick: () -> Unit,
     // Per-pad EQ + Level + Delay Time
@@ -307,31 +304,12 @@ fun EQPanel(
                 SectionLabel("PAD BEHAVIOUR")
 
                 EqToggleRow(
-                    title = "EXCLUSIVE MODE",
-                    subtitle = if (exclusiveMode) "Single Pad Playback" else "Multi Pad Playback",
-                    enabled = exclusiveMode,
-                    activeColor = EqAccent,
-                    onToggle = onExclusiveChange
-                )
-
-                EqToggleRow(
                     title = "VELOCITY",
                     subtitle = if (velocityOn) "Hit strength affects volume" else "Always full volume",
                     enabled = velocityOn,
                     activeColor = EqGreen,
                     onToggle = onVelocityChange
                 )
-
-                if (exclusiveMode) {
-                    ActiveChokeLevelSelector(
-                        activeLevel = activeChokeLevel,
-                        onSelect    = onSelectActiveChokeLevel
-                    )
-                    ChokeLevelsSection(
-                        allPadChokeGroups = allPadChokeGroups,
-                        onToggleLevel     = onToggleChokeGroup
-                    )
-                }
 
                 EqDividerLine()
 
@@ -481,70 +459,6 @@ private fun EqToggleRow(
                  color = if (enabled) activeColor else EqTextMuted, fontSize = 8.sp)
         }
         PillToggle(enabled = enabled, activeColor = activeColor)
-    }
-}
-
-@Composable
-private fun ActiveChokeLevelSelector(activeLevel: Int, onSelect: (Int) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-            .background(EqPanelBg).padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text("ACTIVE LEVEL", color = EqTextWht, fontSize = 9.sp,
-             fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
-        Text(
-            if (activeLevel != 0) "Level $activeLevel is live" else "No level active — tap one below",
-            color = if (activeLevel != 0) EqAccent else EqTextMuted, fontSize = 8.sp
-        )
-        Spacer(Modifier.height(2.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            (1..6).forEach { level ->
-                val selected = level == activeLevel
-                Box(
-                    modifier = Modifier.weight(1f).height(28.dp).clip(RoundedCornerShape(6.dp))
-                        .background(if (selected) EqGreen else Color(0xFF2A2A2A))
-                        .clickable(remember { MutableInteractionSource() }, null) { onSelect(level) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("$level", color = if (selected) Color.Black else EqTextMuted,
-                         fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChokeLevelsSection(allPadChokeGroups: List<List<Int>>, onToggleLevel: (Int, Int) -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-            .background(EqPanelBg).padding(10.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text("CHOKE LEVELS", color = EqTextWht, fontSize = 9.sp,
-             fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
-        Text("Pick which pads belong to each level", color = EqTextMuted, fontSize = 8.sp)
-        (1..6).forEach { level ->
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("LEVEL $level", color = EqAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    (0..7).forEach { padIndex ->
-                        val sel = level in allPadChokeGroups[padIndex]
-                        Box(
-                            modifier = Modifier.weight(1f).height(24.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(if (sel) EqAccent else Color(0xFF2A2A2A))
-                                .clickable(remember { MutableInteractionSource() }, null) { onToggleLevel(padIndex, level) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text("${padIndex + 1}", color = if (sel) Color.Black else EqTextMuted,
-                                 fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

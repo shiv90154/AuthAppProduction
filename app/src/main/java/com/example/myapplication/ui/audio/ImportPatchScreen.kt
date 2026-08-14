@@ -166,9 +166,20 @@ private fun readPatchZip(
         }
     } ?: throw IllegalStateException("Could not open patch file")
 
-    val root = patchJson ?: throw IllegalStateException("Not a valid patch file")
-    val kitObj = root.optJSONObject("kit") ?: throw IllegalStateException("Not a valid patch file")
-    val entry = KitRepository.fromJson(kitObj)
+    val root = patchJson ?: run {
+        extractedFiles.values.forEach { it.delete() }
+        throw IllegalStateException("Not a valid patch file")
+    }
+    val kitObj = root.optJSONObject("kit") ?: run {
+        extractedFiles.values.forEach { it.delete() }
+        throw IllegalStateException("Not a valid patch file")
+    }
+    val entry = try {
+        KitRepository.fromJson(kitObj)
+    } catch (e: Exception) {
+        extractedFiles.values.forEach { it.delete() }
+        throw IllegalStateException("Not a valid patch file", e)
+    }
 
     val audios = mutableListOf<ImportedPatchAudio>()
     val audiosJson = root.optJSONArray("audios")

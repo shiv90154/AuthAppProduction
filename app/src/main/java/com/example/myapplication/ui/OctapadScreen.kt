@@ -684,20 +684,20 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             // currently-active banks. Now every ACTIVE bank's own choke
             // level + group membership is checked, so a pad hit on Bank A
             // layered with Bank B/C chokes correctly across the combination.
-            val bankKitIdx()s = buildList {
+            val bankKitIdxs = buildList {
                 if ('A' in bankMode) add(currentKit)
                 if ('B' in bankMode) add(currentKitB)
                 if ('C' in bankMode) add(currentKitC)
             }.filter { it in kits.indices }
 
-            fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdx()s.any { bankKit ->
+            fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdxs.any { bankKit ->
                 val activeLevel = kits[bankKit].activeChokeLevelState.value
                 activeLevel != 0 &&
                     activeLevel in kits[bankKit].chokeGroups[padA] &&
                     activeLevel in kits[bankKit].chokeGroups[padB]
             }
 
-            if (bankKitIdx()s.isNotEmpty()) {
+            if (bankKitIdxs.isNotEmpty()) {
                 chokeActivePads.keys.toList().forEach { otherPad ->
                     if (otherPad != index && chokesTogether(index, otherPad)) {
                         nativeSlotsFor(otherPad).forEach { DrumEngine.stop(it) }
@@ -2451,6 +2451,28 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     ) {
                         androidx.compose.material3.Text(
                             "CANCEL", color = Color(0xFFCCCCCC),
+                            fontSize = 11.sp, fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    // NEW: explicit way out of Edit Mode right from the menu
+                    // itself — closes this popup AND turns Edit Mode off, so
+                    // pads go back to playing normally without having to find
+                    // the round EDIT button again.
+                    Box(
+                        modifier = Modifier
+                            .width(200.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xFF3A2A00))
+                            .clickable(remember { MutableInteractionSource() }, null) {
+                                editModeOn = false
+                                editMenuPad = null
+                            }
+                            .padding(vertical = 10.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        androidx.compose.material3.Text(
+                            "EXIT EDIT MODE", color = Color(0xFFFFB74D),
                             fontSize = 11.sp, fontWeight = FontWeight.Bold
                         )
                     }

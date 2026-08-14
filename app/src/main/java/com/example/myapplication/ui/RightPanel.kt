@@ -39,6 +39,11 @@ fun RightPanel(
     onPitchChange: (Float) -> Unit,
     kits: List<Kit>,
     currentKit: Int,
+    // Which kit the LCD name label should actually show — Bank A's
+    // currentKit when Bank A is (part of) the active selection, otherwise
+    // whichever bank's kit the VOL/PITCH sliders are currently editing.
+    // Defaults to currentKit so any other call site keeps its old behavior.
+    bankKitIdx: Int = currentKit,
     onKitAdd: () -> Unit,
     onKitDelete: () -> Unit,
     onKitPrev: () -> Unit,
@@ -450,13 +455,21 @@ fun RightPanel(
                     // NEW: kit name — the old LCD block used to show this;
                     // brought back as a plain text line (no waveform) so the
                     // active kit is still visible without the removed panel.
-                    // Renders whatever's in kits[currentKit].name as-is,
+                    // Renders whatever's in kits[bankKitIdx].name as-is,
                     // including Hindi/Devanagari — Text() uses the system
                     // default font here, which already covers Devanagari via
                     // Android's normal font-fallback, no extra font needed.
-                    if (currentKit in kits.indices) {
+                    //
+                    // BUG FIX: this used to always read kits[currentKit]
+                    // (Bank A's name) regardless of which bank was selected —
+                    // with Bank B/C active (and the VOL/PITCH sliders right
+                    // below correctly editing that bank's kit), the LCD
+                    // showed the wrong kit's name entirely. bankKitIdx is
+                    // passed in from OctapadScreen (same value the sliders
+                    // use) instead of the raw currentKit param.
+                    if (bankKitIdx in kits.indices) {
                         Text(
-                            text = kits[currentKit].name,
+                            text = kits[bankKitIdx].name,
                             color = Color(0xFF00E5FF),
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Bold,

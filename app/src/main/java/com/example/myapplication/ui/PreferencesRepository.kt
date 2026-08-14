@@ -141,19 +141,60 @@ object PreferencesRepository {
         return obj
     }
 
+    // Holds every field read out of a backup's "preferences" payload, fully
+    // parsed and type-checked, before anything is written to disk.
+    private class ParsedPrefs(
+        val bpm: Int?, val exclusiveMode: Boolean?, val loopEnabled: Boolean?,
+        val delayEnabled: Boolean?, val delayChokePad: Int?, val delayLevel: Float?,
+        val speed: Float?, val selectedPad: Int?, val velocityOn: Boolean?,
+        val bankMode: String?, val kitB: Int?, val kitC: Int?, val midiChannel: Int?
+    )
+
+    // BUG FIX: importBackup used to call save*() immediately as it read each
+    // field, so a single malformed field (wrong JSON type — e.g. a corrupted
+    // backup where KEY_DELAY_LEVEL isn't a number) threw partway through,
+    // leaving every field read BEFORE it already persisted and every field
+    // after it untouched — a half-applied restore, not the atomic
+    // all-or-nothing a "restore" should be. Split into a validate-only parse
+    // pass (throws before any write) and a commit pass, mirroring
+    // KitRepository's fix for the same failure class. Also lets
+    // BackupScreen's restore flow validate every repository's payload before
+    // committing any of them.
+    private fun parseBackupPayload(obj: org.json.JSONObject): ParsedPrefs = ParsedPrefs(
+        bpm = if (obj.has(KEY_BPM)) obj.getInt(KEY_BPM) else null,
+        exclusiveMode = if (obj.has(KEY_EXCLUSIVE_MODE)) obj.getBoolean(KEY_EXCLUSIVE_MODE) else null,
+        loopEnabled = if (obj.has(KEY_LOOP_ENABLED)) obj.getBoolean(KEY_LOOP_ENABLED) else null,
+        delayEnabled = if (obj.has(KEY_DELAY_ENABLED)) obj.getBoolean(KEY_DELAY_ENABLED) else null,
+        delayChokePad = if (obj.has(KEY_DELAY_CHOKE_PAD)) obj.getInt(KEY_DELAY_CHOKE_PAD) else null,
+        delayLevel = if (obj.has(KEY_DELAY_LEVEL)) obj.getDouble(KEY_DELAY_LEVEL).toFloat() else null,
+        speed = if (obj.has(KEY_SPEED)) obj.getDouble(KEY_SPEED).toFloat() else null,
+        selectedPad = if (obj.has(KEY_SELECTED_PAD)) obj.getInt(KEY_SELECTED_PAD) else null,
+        velocityOn = if (obj.has(KEY_VELOCITY_ON)) obj.getBoolean(KEY_VELOCITY_ON) else null,
+        bankMode = if (obj.has(KEY_BANK_MODE)) obj.getString(KEY_BANK_MODE) else null,
+        kitB = if (obj.has(KEY_KIT_B)) obj.getInt(KEY_KIT_B) else null,
+        kitC = if (obj.has(KEY_KIT_C)) obj.getInt(KEY_KIT_C) else null,
+        midiChannel = if (obj.has(KEY_MIDI_CHANNEL)) obj.getInt(KEY_MIDI_CHANNEL) else null
+    )
+
+    /** Throws if [obj]'s fields don't parse; writes nothing either way. */
+    fun validateBackupPayload(obj: org.json.JSONObject) {
+        parseBackupPayload(obj)
+    }
+
     fun importBackup(obj: org.json.JSONObject) {
-        if (obj.has(KEY_BPM)) saveBpm(obj.getInt(KEY_BPM))
-        if (obj.has(KEY_EXCLUSIVE_MODE)) saveExclusiveMode(obj.getBoolean(KEY_EXCLUSIVE_MODE))
-        if (obj.has(KEY_LOOP_ENABLED)) saveLoopEnabled(obj.getBoolean(KEY_LOOP_ENABLED))
-        if (obj.has(KEY_DELAY_ENABLED)) saveDelayEnabled(obj.getBoolean(KEY_DELAY_ENABLED))
-        if (obj.has(KEY_DELAY_CHOKE_PAD)) saveDelayChokePad(obj.getInt(KEY_DELAY_CHOKE_PAD))
-        if (obj.has(KEY_DELAY_LEVEL)) saveDelayLevel(obj.getDouble(KEY_DELAY_LEVEL).toFloat())
-        if (obj.has(KEY_SPEED)) saveSpeed(obj.getDouble(KEY_SPEED).toFloat())
-        if (obj.has(KEY_SELECTED_PAD)) saveSelectedPad(obj.getInt(KEY_SELECTED_PAD))
-        if (obj.has(KEY_VELOCITY_ON)) saveVelocityOn(obj.getBoolean(KEY_VELOCITY_ON))
-        if (obj.has(KEY_BANK_MODE)) saveBankMode(obj.getString(KEY_BANK_MODE))
-        if (obj.has(KEY_KIT_B)) saveKitB(obj.getInt(KEY_KIT_B))
-        if (obj.has(KEY_KIT_C)) saveKitC(obj.getInt(KEY_KIT_C))
-        if (obj.has(KEY_MIDI_CHANNEL)) saveMidiChannel(obj.getInt(KEY_MIDI_CHANNEL))
+        val parsed = parseBackupPayload(obj)
+        parsed.bpm?.let { saveBpm(it) }
+        parsed.exclusiveMode?.let { saveExclusiveMode(it) }
+        parsed.loopEnabled?.let { saveLoopEnabled(it) }
+        parsed.delayEnabled?.let { saveDelayEnabled(it) }
+        parsed.delayChokePad?.let { saveDelayChokePad(it) }
+        parsed.delayLevel?.let { saveDelayLevel(it) }
+        parsed.speed?.let { saveSpeed(it) }
+        parsed.selectedPad?.let { saveSelectedPad(it) }
+        parsed.velocityOn?.let { saveVelocityOn(it) }
+        parsed.bankMode?.let { saveBankMode(it) }
+        parsed.kitB?.let { saveKitB(it) }
+        parsed.kitC?.let { saveKitC(it) }
+        parsed.midiChannel?.let { saveMidiChannel(it) }
     }
 }

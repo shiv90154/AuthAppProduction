@@ -197,6 +197,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // onto another pad and released — far too easy to trigger by accident.
     // Now gated on a hold: see beginTwoFingerHold()/endTwoFingerHold() below.
     var dragHoldJob by remember { mutableStateOf<Job?>(null) }
+    // Becomes true once the 2-finger press on the FIRST (source) pad has
+    // been held continuously for 3.5s — from then on, wherever the fingers
+    // are/move to is tracked live (hover), same as before this gate existed.
+    // Not whether the finger happens to be sitting on a second pad exactly
+    // at the 3.5s mark — that was the actual bug, see beginTwoFingerHold().
+    var holdArmed by remember { mutableStateOf(false) }
 
 
     val padVolumes = remember {
@@ -1518,33 +1524,53 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // A 2-finger press on a pad used to open the Swap/Mix/Add-to-Last menu
     // the instant the fingers were lifted over a different pad — no hold
     // required, so it fired on any quick 2-finger tap/brush, not just a
-    // deliberate drag. Now it only opens after the 2 fingers have been held
-    // down continuously for ~3.5s (within the 3-4s asked for); lifting
-    // before that cancels the pending job and the menu never appears at all.
+    // deliberate drag.
+    //
+    // BUG FIX: the first version of this gate computed the target pad ONCE,
+    // in a fixed one-shot job that fired exactly 3.5s after the initial
+    // 2-finger press-down — so whichever pad the fingers happened to be
+    // sitting on at that precise instant was locked in as the target. That
+    // meant the 3.5s effectively had to be spent hovering the SECOND pad
+    // already, not held on the first pad and then dragged over afterward —
+    // if the user pressed pad A, waited, then moved to pad B only near/after
+    // the 3.5s mark, the snapshot could miss it entirely and the menu never
+    // appeared. The 3.5s is meant to arm the gesture (measured from the
+    // press on the first/source pad), not to force the finger to already be
+    // parked on the destination the instant the timer fires. Now the timer
+    // only flips `holdArmed` true after 3.5s of continuous holding — from
+    // that point on the drag position is tracked live (hover), exactly like
+    // before this gate existed — and the target pad is resolved from
+    // wherever the fingers actually are at RELEASE (endTwoFingerHold), same
+    // as the pre-gate behavior, just now requiring the press to have lasted
+    // 3.5s+ in total before it's honored.
     fun beginTwoFingerHold(padNum: Int, startX: Float, startY: Float) {
         dragVisible = true
         dragPad = padNum
         sourcePad = padNum
         dragX = startX
         dragY = startY
+        holdArmed = false
         dragHoldJob?.cancel()
         dragHoldJob = scope.launch {
             delay(3500L)
-            targetPad = detectTargetPad()
-            dragVisible = false
-            if (targetPad != -1 && targetPad != sourcePad) {
-                showPadMenu = true
-            }
+            holdArmed = true
         }
     }
 
     fun endTwoFingerHold() {
-        // A no-op if the hold already completed (job finished, menu already
-        // shown) — only actually cancels/hides anything for a hold that was
-        // released early, before the 3.5s gate elapsed.
         dragHoldJob?.cancel()
         dragHoldJob = null
         dragVisible = false
+        // Only honor the release if the press lasted the full 3.5s — a
+        // release before that (holdArmed still false) cancels silently,
+        // same as before, the menu never appears at all.
+        if (holdArmed) {
+            targetPad = detectTargetPad()
+            if (targetPad != -1 && targetPad != sourcePad) {
+                showPadMenu = true
+            }
+        }
+        holdArmed = false
     }
 
     // BoxWithConstraints instead of Box: reading maxWidth lets the control

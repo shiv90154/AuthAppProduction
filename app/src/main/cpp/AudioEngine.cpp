@@ -218,6 +218,24 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
             }
 
             if (claimed) {
+                // A lone hit starting from silence gets NO fade — the
+                // reverted 2026-08-18 attempt applied the fade
+                // unconditionally and caused crackle on every single tap,
+                // including this exact case where there was nothing to
+                // protect against in the first place. Only arm the fade
+                // (attackGain = 0.0f) when at least one OTHER voice is
+                // already sounding — a genuinely concurrent/overlapping
+                // hit, which is what "multi-hit crackle" actually meant.
+                // `claimed` itself is still ready == false here (never
+                // published yet), so this scan can't see itself.
+                bool anotherVoiceActive = false;
+                for (auto &other : voices_) {
+                    if (other.ready.load(std::memory_order_acquire)) {
+                        anotherVoiceActive = true;
+                        break;
+                    }
+                }
+
                 Voice &v = *claimed;
                 v.padIndex = padIndex;
                 v.position = 0.0;
@@ -229,7 +247,7 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
                 v.pan.store(pan, std::memory_order_relaxed);
                 v.gain.store(gain, std::memory_order_relaxed);
                 v.releaseGain = 1.0f;
-                v.attackGain = 0.0f;
+                v.attackGain = anotherVoiceActive ? 0.0f : 1.0f;
                 v.releasing.store(false, std::memory_order_release);
                 v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
                                   std::memory_order_relaxed);
@@ -396,6 +414,20 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
             int pad = it->padIndex;
             std::lock_guard<std::mutex> bufLock(bufferMutex_);
             if (pad >= 0 && pad < kMaxPads && buffers_[pad].loaded) {
+                // Same "only fade if something else is already sounding"
+                // rule as triggerPad's claim — see the note on Voice::
+                // attackGain for why an unconditional fade regressed into
+                // crackle on every hit. An echo playing into pure silence
+                // (the original already finished by the time this tap
+                // fires) gets no fade either.
+                bool anotherVoiceActive = false;
+                for (auto &other : voices_) {
+                    if (other.ready.load(std::memory_order_acquire)) {
+                        anotherVoiceActive = true;
+                        break;
+                    }
+                }
+
                 for (auto &v : voices_) {
                     bool expected = false;
                     if (v.active.compare_exchange_strong(expected, true)) {
@@ -414,7 +446,7 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
                         v.pan.store(it->pan, std::memory_order_relaxed);
                         v.gain.store(it->gain, std::memory_order_relaxed);
                         v.releaseGain = 1.0f;
-                        v.attackGain = 0.0f;
+                        v.attackGain = anotherVoiceActive ? 0.0f : 1.0f;
                         v.releasing.store(false, std::memory_order_release);
                         v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
                                           std::memory_order_relaxed);
@@ -445,12 +477,11 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // below reflects real simultaneous polyphony, not just claimed slots.
     int32_t activeVoiceCount = 0;
 
-    // Retrigger fade-out (~5ms) / fresh-voice fade-in (~3ms) step sizes —
-    // both depend only on outputSampleRate_, which is fixed for this whole
-    // callback, so hoisted out of the per-voice loop below instead of
-    // recomputed (a float division each) once per active voice per buffer —
-    // harmless alone but adds up on the real-time audio thread as polyphony
-    // grows toward the 64-voice pool limit.
+    // Retrigger fade-out (~5ms) / concurrent-claim fade-in (~3ms) step
+    // sizes — both depend only on outputSampleRate_, which is fixed for
+    // this whole callback, so hoisted out of the per-voice loop below
+    // instead of recomputed (a float division) once per active voice per
+    // buffer.
     const float releaseStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.005f);
     const float attackStep  = 1.0f / (static_cast<float>(outputSampleRate_) * 0.003f);
 
@@ -494,13 +525,12 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 
             // Retrigger fade-out: ~5ms linear ramp to silence instead of an
             // instant cut, so a fast retrigger never produces a click/pop.
-            // Fade-IN (attackStep): ~3ms linear ramp from silence instead of
-            // starting at full amplitude on frame 0 (rarely a zero-crossing
-            // sample) — same click-avoidance idea, applied to the start of a
-            // voice instead of the end. attackGain is only ever < 1.0 for
-            // the first ~3ms after a fresh claim (see triggerPad/
-            // fireDelayTaps), so this is a no-op for every already-playing
-            // voice. Both step sizes computed once above, outside this loop.
+            // Fade-in (attackGain): only armed (< 1.0) by triggerPad/
+            // fireDelayTaps when this voice was claimed while at least one
+            // OTHER voice was already sounding — a lone hit into silence
+            // sets attackGain straight to 1.0f, so this branch is simply
+            // never entered for that case (no cost, no behavior change from
+            // before any of this existed).
             bool isReleasing = v.releasing.load(std::memory_order_relaxed);
 
             for (int32_t i = 0; i < numFrames; i++) {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      windowLayoutInDisplayCutoutMode is only available from API 27 — this
+      overlay applies just to devices that actually have it, leaving the
+      base themes.xml untouched for older API levels.
+
+      Without this, how a notch/camera-cutout is handled in this app's
+      fullscreen immersive landscape mode (system bars hidden entirely,
+      see MainActivity.hideSystemBars()) is left to each OEM's default,
+      which is not consistent — some phones letterbox around the cutout,
+      effectively shrinking the usable drawing area and cutting off part
+      of the fixed hardware-sampler layout ("full screen on some phones,
+      half on others"). "shortEdges" makes every device let this app draw
+      into the cutout area the same way; OctapadScreen.kt then pads its
+      root content by WindowInsets.displayCutout so the actual pad
+      grid/control panel still never renders literally under the notch.
+    -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#FF111111</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

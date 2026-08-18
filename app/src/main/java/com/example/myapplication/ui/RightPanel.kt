@@ -9,6 +9,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -86,7 +87,7 @@ fun RightPanel(
     bpm: Int = 120,
     onBpmChange: (Int) -> Unit = {},
 
-    // Delay — now surfaced inside the FX panel (EQPanel), not a standalone panel
+    // Delay — its own dedicated top-level panel (DelayPanel.kt), not part of FX
     delayEnabled: Boolean = false,
     delayChokePad: Int = -1,
     onDelayEnabledChange: (Boolean) -> Unit = {},
@@ -95,6 +96,10 @@ fun RightPanel(
     onDelayTimeChange: (Int) -> Unit = {},
     delayLevel: Float = 0.5f,
     onDelayLevelChange: (Float) -> Unit = {},
+    // Global delay master kill switch — OFF mutes delay everywhere without
+    // touching any pad's own delayEnabled flag.
+    delayMasterEnabled: Boolean = true,
+    onDelayMasterEnabledChange: (Boolean) -> Unit = {},
     padLengthPct: Float = 1f,
     onPadLengthChange: (Float) -> Unit = {},
 
@@ -125,19 +130,18 @@ fun RightPanel(
     padGain: Float = 1f,
     onGainChange: (Float) -> Unit = {},
 
-    // A/B/C Bank — bankMode is a string containing any subset of "ABC";
-    // NEW: single-select (tapping A/B/C plays ONLY that bank, replacing
-    // whatever was active) + a separate ALL button (A+B+C together) —
-    // onBankModeSelect sets bankMode directly rather than toggling one
-    // letter's membership in a multi-select set.
+    // A/B Bank — bankMode is a string containing any subset of "AB";
+    // single-select (tapping A/B plays ONLY that bank, replacing whatever
+    // was active) + a separate A+B button (both together) — onBankModeSelect
+    // sets bankMode directly rather than toggling one letter's membership in
+    // a multi-select set. Bank C was removed entirely — it used to push this
+    // non-scrolling panel's patch-list nav row off the bottom whenever it
+    // was active.
     bankMode: String = "A",
     onBankModeSelect: (String) -> Unit = {},
     kitBName: String = "",
     onKitBPrev: () -> Unit = {},
     onKitBNext: () -> Unit = {},
-    kitCName: String = "",
-    onKitCPrev: () -> Unit = {},
-    onKitCNext: () -> Unit = {},
     // Responsive width (see BoxWithConstraints in OctapadScreen) — ~20% of
     // screen width, clamped — instead of one fixed dp tuned for one device.
     controlPanelWidth: Dp = 190.dp
@@ -150,6 +154,9 @@ fun RightPanel(
     // NEW: CHOKE now has its own dedicated panel/button next to CROP,
     // instead of living buried inside FX behind EXCLUSIVE MODE.
     var showChokePanel by remember { mutableStateOf(false) }
+    // NEW: DELAY now has its own dedicated panel/button next to CROP/CHOKE,
+    // instead of living buried inside FX.
+    var showDelayPanel by remember { mutableStateOf(false) }
 
     // Same proportions the original fixed dp values had relative to the
     // 190dp main column (220/200/170), now scaled off the responsive
@@ -178,26 +185,18 @@ fun RightPanel(
                 onRecordClick = onRecordClick,
                 masterLevel = masterLevel,
                 eqLow = eqLow, eqMid = eqMid, eqHigh = eqHigh,
-                delayTimeMs = delayTimeMs,
                 padLengthPct = padLengthPct,
                 onPadLengthChange = onPadLengthChange,
                 onMasterLevelChange = onMasterLevelChange,
                 onEqLowChange = onEqLowChange,
                 onEqMidChange = onEqMidChange,
                 onEqHighChange = onEqHighChange,
-                onDelayTimeMsChange = onDelayTimeChange,
                 padReverse = padReverse,
                 onReverseChange = onReverseChange,
                 padPan = padPan,
                 onPanChange = onPanChange,
                 padGain = padGain,
                 onGainChange = onGainChange,
-                delayEnabled = delayEnabled,
-                onDelayEnabledChange = onDelayEnabledChange,
-                delayLevel = delayLevel,
-                onDelayLevelChange = onDelayLevelChange,
-                delayChokePad = delayChokePad,
-                onDelayChokePadChange = onDelayChokePadChange,
                 onImportToPad = {
                     showEqPanel = false
                     onImportToPad()
@@ -223,6 +222,30 @@ fun RightPanel(
                 activeChokeLevel = activeChokeLevel,
                 onSelectActiveChokeLevel = onSelectActiveChokeLevel,
                 onClose = { showChokePanel = false }
+            )
+        }
+
+        // ── Delay Panel — dedicated top-level panel next to CROP/CHOKE ─────────
+        AnimatedVisibility(
+            visible = showDelayPanel,
+            enter   = slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(220)) + fadeIn(tween(220)),
+            exit    = slideOutHorizontally(targetOffsetX  = { -it }, animationSpec = tween(180)) + fadeOut(tween(180))
+        ) {
+            DelayPanel(
+                width = eqPanelWidth,
+                visible = showDelayPanel,
+                selectedPad = selectedPad,
+                masterEnabled = delayMasterEnabled,
+                onMasterEnabledChange = onDelayMasterEnabledChange,
+                padDelayEnabled = delayEnabled,
+                onPadDelayEnabledChange = onDelayEnabledChange,
+                delayTimeMs = delayTimeMs,
+                onDelayTimeMsChange = onDelayTimeChange,
+                delayLevel = delayLevel,
+                onDelayLevelChange = onDelayLevelChange,
+                delayChokePad = delayChokePad,
+                onDelayChokePadChange = onDelayChokePadChange,
+                onClose = { showDelayPanel = false }
             )
         }
 
@@ -316,7 +339,7 @@ fun RightPanel(
                 modifier = Modifier.fillMaxWidth()
             )
             CtrlBtnRow(
-                labels = listOf("CROP", "CHOKE"),
+                labels = listOf("CROP", "CHOKE", "DELAY"),
                 active = activeBtn,
                 onSelect = { label ->
                     activeBtn = label
@@ -324,6 +347,7 @@ fun RightPanel(
                     showMusicPanel = false
                     showTempoPanel = false
                     showChokePanel = false
+                    showDelayPanel = false
                     when (label) {
                         "CROP" -> onOpenEdit()   // open WaveformEditorScreen
                         "CHOKE" -> {
@@ -334,6 +358,7 @@ fun RightPanel(
                             // picker (gated on exclusiveMode below) is usable immediately.
                             onExclusiveChange(true)
                         }
+                        "DELAY" -> showDelayPanel = true
                     }
                 }
             )
@@ -382,6 +407,7 @@ fun RightPanel(
                                 showMusicPanel = false
                                 showTempoPanel = false
                                 showChokePanel = false
+                                showDelayPanel = false
                                 onOpenLoadKit()
                             }
                         }
@@ -408,6 +434,7 @@ fun RightPanel(
                             showMusicPanel = false
                             showTempoPanel = false
                             showChokePanel = false
+                            showDelayPanel = false
                         }
 
                         "LOOP" ->{
@@ -415,6 +442,7 @@ fun RightPanel(
                             showEqPanel = false
                             showMusicPanel = false
                             showChokePanel = false
+                            showDelayPanel = false
                         }
 
                         "SETTINGS" ->{
@@ -422,6 +450,7 @@ fun RightPanel(
                             showEqPanel = false
                             showTempoPanel = false
                             showChokePanel = false
+                            showDelayPanel = false
                         }
 
                         else->{
@@ -429,6 +458,7 @@ fun RightPanel(
                             showMusicPanel = false
                             showTempoPanel = false
                             showChokePanel = false
+                            showDelayPanel = false
                         }
                     }
                 }
@@ -514,16 +544,18 @@ fun RightPanel(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(50))
                                     .background(if (delayEnabled) Color(0xFF00E5FF) else Color(0xFF3A3A3A))
-                                    // NEW: direct one-tap on/off, no need to open FX first —
-                                    // asked for explicitly for live/stage use, where digging
-                                    // into a submenu mid-performance isn't practical. Long-press
-                                    // still opens FX for timing/level tweaks. Single gesture
-                                    // detector handling both, not two competing ones.
+                                    // Direct one-tap on/off, no need to open the DELAY panel
+                                    // first — asked for explicitly for live/stage use, where
+                                    // digging into a submenu mid-performance isn't practical.
+                                    // Long-press opens the dedicated DELAY panel (moved out of
+                                    // FX) for timing/level tweaks. Single gesture detector
+                                    // handling both, not two competing ones.
                                     .pointerInput(delayEnabled) {
                                         detectTapGestures(
                                             onTap = { onDelayEnabledChange(!delayEnabled) },
                                             onLongPress = {
-                                                showEqPanel = true
+                                                showDelayPanel = true
+                                                showEqPanel = false
                                                 showMusicPanel = false
                                                 showTempoPanel = false
                                                 showChokePanel = false
@@ -589,15 +621,13 @@ fun RightPanel(
             // was taking up vertical space the panel doesn't have room for
             // now that scrolling is gone.
 
-            // ── A/B/C Bank selector — A/B/C are single-select (tapping one
-            // plays ONLY that bank), plus two explicit combos: A+B and ALL
-            // (A+B+C). Split into two rows — "BANK A/B/C" + "A+B"/"ALL" all
-            // in one row was too cramped for this panel's width.
+            // ── A/B Bank selector — A/B are single-select (tapping one plays
+            // ONLY that bank), plus an explicit A+B combo below.
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                listOf('A', 'B', 'C').forEach { letter ->
+                listOf('A', 'B').forEach { letter ->
                     val selected = bankMode == letter.toString()
                     Box(
                         modifier = Modifier
@@ -624,7 +654,7 @@ fun RightPanel(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // NEW: A+B — plays Bank A and Bank B together, C stays off.
+                // A+B — plays Bank A and Bank B together.
                 run {
                     val abSelected = bankMode == "AB"
                     Box(
@@ -639,25 +669,6 @@ fun RightPanel(
                         Text(
                             "A+B",
                             color = if (abSelected) Color.Black else Color(0xFFCCCCCC),
-                            fontSize = 8.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-                run {
-                    val allSelected = bankMode == "ABC"
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (allSelected) BtnActive else BtnBg)
-                            .pointerInput(Unit) { detectTapGestures { onBankModeSelect("ABC") } }
-                            .padding(vertical = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            "ALL",
-                            color = if (allSelected) Color.Black else Color(0xFFCCCCCC),
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -711,47 +722,6 @@ fun RightPanel(
                 }
             }
 
-            // Bank C kit selector — only shown while Bank C is actually audible
-            if ('C' in bankMode) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(NavRed)
-                            .pointerInput(Unit) { detectTapGestures { onKitCPrev() } },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("<", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                    Text(
-                        "C: $kitCName",
-                        color = Color(0xFFFFB74D),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(NavRed)
-                            .pointerInput(Unit) { detectTapGestures { onKitCNext() } },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(">", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                }
-            }
-
             Spacer(modifier = Modifier.height(6.dp))
 
             // ── Navigation Row  < PATCH > ──────────────────────────────────────
@@ -784,6 +754,7 @@ fun RightPanel(
                                 showMusicPanel = false
                                 showTempoPanel = false
                                 showChokePanel = false
+                                showDelayPanel = false
                                 onOpenKitList()
                             }
                         }
@@ -899,18 +870,41 @@ fun LinearSlider(
             modifier = Modifier
                 .width(trackWidth)
                 .height(trackHeight)
+                // BUG FIX: this used to be a single bare
+                // `awaitPointerEventScope { while (true) { ... } }` that ran
+                // for the composable's entire lifetime instead of one
+                // iteration per gesture. Every LinearSlider (VOL/PITCH/EQ/
+                // DLY TIME/DLY LEVEL/…) lives inside a `verticalScroll`
+                // panel (EQPanel/TempoPanel/DelayPanel/ChokePanel) — if a
+                // drag on the slider ever loses touch arbitration to that
+                // ancestor scrollable (a real, ordinary thing to happen with
+                // an even slightly diagonal drag), Compose cancels this
+                // pointerInput's coroutine, which throws out of the bare
+                // `awaitPointerEvent()` call with nothing to catch it. Since
+                // `pointerInput(min, max)` only restarts when min/max
+                // change — never true for a fixed-range slider — that one
+                // cancellation permanently killed touch handling for that
+                // slider instance: it just sat there unresponsive until the
+                // screen was reopened. That's exactly the reported "volume/
+                // pitch knob gets stuck after a while of testing". Wrapping
+                // in awaitEachGesture makes each drag its own session —
+                // Compose absorbs a cancellation between gestures there and
+                // simply waits for the next one, instead of the whole
+                // handler dying.
                 .pointerInput(min, max) {
                     fun applyAtY(y: Float) {
                         val f = (1f - (y / size.height)).coerceIn(0f, 1f)
                         onValueChange(min + f * (max - min))
                     }
-                    awaitPointerEventScope {
+                    awaitEachGesture {
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull() ?: continue
                             if (change.pressed) {
                                 applyAtY(change.position.y)
                                 change.consume()
+                            } else {
+                                break
                             }
                         }
                     }

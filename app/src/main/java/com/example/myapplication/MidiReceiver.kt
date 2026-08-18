@@ -57,18 +57,26 @@ class MidiReceiverHandler : MidiReceiver() {
         when (command) {
 
             // ── Note On ────────────────────────────────────────────────────
+            // BUG FIX: this handler runs on the MIDI receive thread for
+            // EVERY incoming message — Note On/Off logs are one per hit
+            // (tolerable), but the Control Change log below used to fire on
+            // every single CC tick, and a fast knob sweep can send dozens of
+            // those per second. Each Log.d is a real (if individually small)
+            // syscall into the logging daemon; stacking that many of them
+            // back-to-back on this thread, combined with the old
+            // persistKits()-per-tick bug (see OctapadScreen's
+            // persistKitsDebounced), is what read as "MIDI knob gets stuck
+            // after testing for a while" — this thread falling behind under
+            // sustained CC traffic. Removed the per-message logs entirely;
+            // they were never anything but debug noise in a shipped build
+            // anyway (ProGuard/R8 is disabled, so nothing strips them).
             0x90 -> {
                 LatencyTracker.midiTime = System.nanoTime()
-
-                Log.d("MIDI_NOTE",  "NOTE ON  : note=$note velocity=$velocity channel=$channel")
-                Log.d("VELOCITY",   "Pad hit strength = ${((velocity / 127f) * 100).toInt()}%")
-
                 NativeBridge.sendMidiMessage(channel, note, velocity)
             }
 
             // ── Note Off ───────────────────────────────────────────────────
             0x80 -> {
-                Log.d("MIDI_NOTE", "NOTE OFF : note=$note")
                 NativeBridge.sendMidiMessage(channel, note, 0)
             }
 
@@ -76,8 +84,6 @@ class MidiReceiverHandler : MidiReceiver() {
             0xB0 -> {
                 val ccNumber = note      // byte 2 = controller number
                 val ccValue  = velocity  // byte 3 = controller value (0-127)
-                Log.d("MIDI_CC_DEBUG",
-                      "CONTROL CHANGE : cc=$ccNumber value=$ccValue channel=$channel")
                 NativeBridge.sendControlChange(channel, ccNumber, ccValue)
             }
         }

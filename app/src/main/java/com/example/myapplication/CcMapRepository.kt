@@ -15,6 +15,12 @@ object CcMapRepository {
     val TARGETS = listOf(
         "VOLUME", "PITCH", "EQ_LOW", "EQ_MID", "EQ_HIGH",
         "PATCH_NEXT", "PATCH_PREV", "EDIT", "SAVE",
+        // NEW: DELAY_TOGGLE flips the currently-selected pad's own delay
+        // on/off (same action as RightPanel's quick DLY button/EQPanel's
+        // toggle). BANK_A/BANK_B/BANK_AB jump bankMode directly to that
+        // combination — a MIDI footswitch/button per bank, live-performance
+        // shortcut for switching banks hands-free.
+        "DELAY_TOGGLE", "BANK_A", "BANK_B", "BANK_AB",
         // NEW: for MIDI pad controllers that send Control Change instead of
         // Note-On when a pad is hit (some cheap/generic pad controllers do
         // this instead of the GM drum-note convention the Note-On path

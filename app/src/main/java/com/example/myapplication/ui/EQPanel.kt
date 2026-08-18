@@ -51,14 +51,12 @@ fun EQPanel(
     eqLow: Float = 1f,
     eqMid: Float = 1f,
     eqHigh: Float = 1f,
-    delayTimeMs: Int = 300,
     padLengthPct: Float = 1f,
     onPadLengthChange: (Float) -> Unit = {},
     onMasterLevelChange: (Float) -> Unit = {},
     onEqLowChange: (Float) -> Unit = {},
     onEqMidChange: (Float) -> Unit = {},
     onEqHighChange: (Float) -> Unit = {},
-    onDelayTimeMsChange: (Int) -> Unit = {},
     // Per-pad FX: Reverse + explicit Save (PLAY MODE moved to the LOOP panel)
     padReverse: Boolean = false,
     onReverseChange: (Boolean) -> Unit = {},
@@ -67,14 +65,8 @@ fun EQPanel(
     onPanChange: (Float) -> Unit = {},
     padGain: Float = 1f,
     onGainChange: (Float) -> Unit = {},
-    // Delay on/off + decay ("DELAY LEVEL") — merged in from the old standalone
-    // DelayPanel so every FX control lives in one place.
-    delayEnabled: Boolean = false,
-    onDelayEnabledChange: (Boolean) -> Unit = {},
-    delayLevel: Float = 0.5f,
-    onDelayLevelChange: (Float) -> Unit = {},
-    delayChokePad: Int = -1,
-    onDelayChokePadChange: (Int) -> Unit = {},
+    // DELAY moved out to its own dedicated DelayPanel.kt (a top-level DELAY
+    // button next to CROP/CHOKE) — no longer part of FX.
     // NEW: one-tap file-manager import straight onto this pad — skips the
     // separate Import screen → Audios screen → pad-picker detour.
     onImportToPad: () -> Unit = {},
@@ -164,44 +156,6 @@ fun EQPanel(
                         onValueChange = onPadLengthChange
                     )
                 }
-
-                EqDividerLine()
-
-                // ── DELAY (merged in from the old standalone Delay panel) ──────
-                SectionLabel("DELAY")
-
-                EqToggleRow(
-                    title = "DELAY",
-                    subtitle = if (delayEnabled) "On" else "Off",
-                    enabled = delayEnabled,
-                    activeColor = EqOrange,
-                    onToggle = onDelayEnabledChange
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    EqKnobColumn(
-                        label = "DLY TIME",
-                        value = delayTimeMs.toFloat(),
-                        min = 50f, max = 1000f,
-                        color = EqOrange,
-                        displayText = "${delayTimeMs}ms",
-                        onValueChange = { onDelayTimeMsChange(it.toInt()) }
-                    )
-                    EqKnobColumn(
-                        label = "DLY LEVEL",
-                        value = delayLevel,
-                        min = 0f, max = 1f,
-                        color = EqOrange,
-                        displayText = "${(delayLevel * 100).toInt()}%",
-                        onValueChange = onDelayLevelChange
-                    )
-                }
-
-                Text("APPLY TO", color = EqTextMuted, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                DelayApplyToPicker(delayChokePad = delayChokePad, onSelect = onDelayChokePadChange)
 
                 EqDividerLine()
 
@@ -386,52 +340,6 @@ private fun EqKnobColumn(
         trackWidth = 18.dp,
         onValueChange = onValueChange
     )
-}
-
-// ── Delay "APPLY TO" pad picker (ported from the old standalone DelayPanel) ────
-
-@Composable
-private fun DelayApplyToPicker(delayChokePad: Int, onSelect: (Int) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(24.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(if (delayChokePad == -1) EqAccent else Color(0xFF2A2A2A))
-                .clickable(remember { MutableInteractionSource() }, null) { onSelect(-1) },
-            contentAlignment = Alignment.Center
-        ) {
-            Text("ALL", color = if (delayChokePad == -1) Color.Black else EqTextMuted,
-                 fontSize = 7.sp, fontWeight = FontWeight.Bold)
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            (0..3).forEach { pad ->
-                Box(
-                    modifier = Modifier.weight(1f).height(24.dp).clip(RoundedCornerShape(4.dp))
-                        .background(if (delayChokePad == pad) EqAccent else Color(0xFF2A2A2A))
-                        .clickable(remember { MutableInteractionSource() }, null) { onSelect(pad) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("${pad + 1}", color = if (delayChokePad == pad) Color.Black else EqTextMuted,
-                         fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            (4..7).forEach { pad ->
-                Box(
-                    modifier = Modifier.weight(1f).height(24.dp).clip(RoundedCornerShape(4.dp))
-                        .background(if (delayChokePad == pad) EqAccent else Color(0xFF2A2A2A))
-                        .clickable(remember { MutableInteractionSource() }, null) { onSelect(pad) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("${pad + 1}", color = if (delayChokePad == pad) Color.Black else EqTextMuted,
-                         fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
 }
 
 // ── Shared helpers (identical to old EQPanel) ─────────────────────────────────

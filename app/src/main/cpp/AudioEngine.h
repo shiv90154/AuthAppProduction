@@ -47,6 +47,18 @@ struct Voice {
     // atomic (releasing is the only cross-thread signal needed).
     std::atomic<bool>  releasing{false};
     float              releaseGain = 1.0f;
+    // Retrigger/steal fade-IN — mirrors releaseGain above but for the start
+    // of a voice instead of the end. Set to 0.0f by the trigger caller's
+    // thread when a voice is freshly claimed (both a normal free-slot claim
+    // and, more importantly, the pool-exhausted "steal the oldest voice"
+    // path in triggerPad()), then ramped up to 1.0 by the audio thread over
+    // a few ms in onAudioReady, same discipline as releaseGain (only ever
+    // touched by the audio thread once published, so a plain float is fine).
+    // Softens the click/pop that a voice starting at full amplitude on a
+    // non-zero-crossing sample can produce — most audible exactly when the
+    // 64-voice pool is under pressure during fast multi-hit playing, which
+    // is also when a stolen voice's outgoing sample got cut with zero fade.
+    float              attackGain = 1.0f;
     // Monotonically increasing claim order, used only to pick a voice to
     // steal (the oldest one) when the whole 64-voice pool is exhausted —
     // see AudioEngine::triggerPad(). Not part of the active/ready publish

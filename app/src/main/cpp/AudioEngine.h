@@ -47,17 +47,20 @@ struct Voice {
     // atomic (releasing is the only cross-thread signal needed).
     std::atomic<bool>  releasing{false};
     float              releaseGain = 1.0f;
-    // Retrigger/steal fade-IN — mirrors releaseGain above but for the start
-    // of a voice instead of the end. Set to 0.0f by the trigger caller's
-    // thread when a voice is freshly claimed (both a normal free-slot claim
-    // and, more importantly, the pool-exhausted "steal the oldest voice"
-    // path in triggerPad()), then ramped up to 1.0 by the audio thread over
-    // a few ms in onAudioReady, same discipline as releaseGain (only ever
-    // touched by the audio thread once published, so a plain float is fine).
-    // Softens the click/pop that a voice starting at full amplitude on a
-    // non-zero-crossing sample can produce — most audible exactly when the
-    // 64-voice pool is under pressure during fast multi-hit playing, which
-    // is also when a stolen voice's outgoing sample got cut with zero fade.
+    // Attack fade-in — mirrors releaseGain above but for the start of a
+    // voice instead of the end. A first attempt (2026-08-18) applied this
+    // unconditionally to every single claim and caused audible crackle on
+    // EVERY tap, including a lone hit starting from silence — reverted the
+    // same day. Root cause: fading a voice that has nothing else to blend
+    // with (silence -> one voice) has no reason to exist and apparently
+    // made things worse, not better, on real hardware. Reintroduced
+    // narrower: `triggerPad`/`fireDelayTaps` now only set this to 0.0f (arm
+    // the fade) when at least one OTHER voice is already `ready` at claim
+    // time — i.e. only for a genuinely concurrent/overlapping hit, which is
+    // what "multi-hit crackle" actually described. A voice claimed into
+    // silence sets this straight to 1.0f (no fade, byte-for-byte the
+    // pre-attack-fade behavior). Only ever touched by the audio thread once
+    // published, so a plain float is fine (same discipline as releaseGain).
     float              attackGain = 1.0f;
     // Monotonically increasing claim order, used only to pick a voice to
     // steal (the oldest one) when the whole 64-voice pool is exhausted —

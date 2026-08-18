@@ -158,6 +158,20 @@ fun RightPanel(
     // instead of living buried inside FX.
     var showDelayPanel by remember { mutableStateOf(false) }
 
+    // Every panel-opening path needs to force-close every OTHER side panel
+    // first, so a newly opened one is never left stacked underneath a stale
+    // one still showing. This used to be 5 repeated lines duplicated across
+    // 6+ call sites — every new panel added (DELAY was the most recent) had
+    // to be hunted down and added to each one individually; forgetting a
+    // site is exactly how two panels end up open at once.
+    fun closeAllPanels() {
+        showEqPanel = false
+        showMusicPanel = false
+        showTempoPanel = false
+        showChokePanel = false
+        showDelayPanel = false
+    }
+
     // Same proportions the original fixed dp values had relative to the
     // 190dp main column (220/200/170), now scaled off the responsive
     // controlPanelWidth instead of hardcoded per-panel constants. Delay
@@ -343,11 +357,7 @@ fun RightPanel(
                 active = activeBtn,
                 onSelect = { label ->
                     activeBtn = label
-                    showEqPanel = false
-                    showMusicPanel = false
-                    showTempoPanel = false
-                    showChokePanel = false
-                    showDelayPanel = false
+                    closeAllPanels()
                     when (label) {
                         "CROP" -> onOpenEdit()   // open WaveformEditorScreen
                         "CHOKE" -> {
@@ -403,11 +413,7 @@ fun RightPanel(
                         .pointerInput(Unit) {
                             detectTapGestures {
                                 activeBtn = ""
-                                showEqPanel = false
-                                showMusicPanel = false
-                                showTempoPanel = false
-                                showChokePanel = false
-                                showDelayPanel = false
+                                closeAllPanels()
                                 onOpenLoadKit()
                             }
                         }
@@ -430,36 +436,24 @@ fun RightPanel(
                     when(label){
 
                         "FX" ->{
-                            showEqPanel = !showEqPanel
-                            showMusicPanel = false
-                            showTempoPanel = false
-                            showChokePanel = false
-                            showDelayPanel = false
+                            val wasOpen = showEqPanel
+                            closeAllPanels()
+                            showEqPanel = !wasOpen
                         }
 
                         "LOOP" ->{
-                            showTempoPanel = !showTempoPanel
-                            showEqPanel = false
-                            showMusicPanel = false
-                            showChokePanel = false
-                            showDelayPanel = false
+                            val wasOpen = showTempoPanel
+                            closeAllPanels()
+                            showTempoPanel = !wasOpen
                         }
 
                         "SETTINGS" ->{
-                            showMusicPanel = !showMusicPanel
-                            showEqPanel = false
-                            showTempoPanel = false
-                            showChokePanel = false
-                            showDelayPanel = false
+                            val wasOpen = showMusicPanel
+                            closeAllPanels()
+                            showMusicPanel = !wasOpen
                         }
 
-                        else->{
-                            showEqPanel = false
-                            showMusicPanel = false
-                            showTempoPanel = false
-                            showChokePanel = false
-                            showDelayPanel = false
-                        }
+                        else -> closeAllPanels()
                     }
                 }
             )
@@ -554,11 +548,16 @@ fun RightPanel(
                                         detectTapGestures(
                                             onTap = { onDelayEnabledChange(!delayEnabled) },
                                             onLongPress = {
+                                                // BUG FIX: this opened the DELAY panel without
+                                                // updating activeBtn, unlike every other panel-
+                                                // opening path (CROP/CHOKE/FX/LOOP/SETTINGS all set
+                                                // it) — so the CROP/CHOKE/DELAY row kept
+                                                // highlighting whatever was tapped last instead of
+                                                // DELAY, even though DELAY was the panel actually
+                                                // showing.
+                                                activeBtn = "DELAY"
+                                                closeAllPanels()
                                                 showDelayPanel = true
-                                                showEqPanel = false
-                                                showMusicPanel = false
-                                                showTempoPanel = false
-                                                showChokePanel = false
                                             }
                                         )
                                     },
@@ -750,11 +749,7 @@ fun RightPanel(
                                 // PATCH LIST full-screen overlay is never
                                 // left underneath a stale panel on top of it.
                                 activeBtn = ""
-                                showEqPanel = false
-                                showMusicPanel = false
-                                showTempoPanel = false
-                                showChokePanel = false
-                                showDelayPanel = false
+                                closeAllPanels()
                                 onOpenKitList()
                             }
                         }

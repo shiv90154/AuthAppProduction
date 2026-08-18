@@ -28,6 +28,7 @@ import com.example.myapplication.ui.audio.WaveformEditorScreen
 import com.example.myapplication.ui.audio.LoadKitScreen
 import com.example.myapplication.ui.kit.KitListScreen
 import com.example.myapplication.ui.pads.*
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.myapplication.ui.drag.DragPadOverlay
@@ -192,6 +193,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     var sourcePad by remember { mutableStateOf(-1) }
     var targetPad by remember { mutableStateOf(-1) }
+    // Swap/Mix/Add-to-Last used to show the instant a 2-finger drag crossed
+    // onto another pad and released — far too easy to trigger by accident.
+    // Now gated on a hold: see beginTwoFingerHold()/endTwoFingerHold() below.
+    var dragHoldJob by remember { mutableStateOf<Job?>(null) }
 
 
     val padVolumes = remember {
@@ -226,6 +231,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // NEW: delay decay/feedback amount (0f..1f) — was a hardcoded 0.5f, now a
     // FX-panel knob ("DELAY LEVEL").
     var delayLevel by remember { mutableStateOf(PreferencesRepository.loadDelayLevel()) }
+    // NEW: global delay master kill switch (DelayPanel.kt's MASTER toggle).
+    // OFF mutes delay on every pad in every kit immediately, without erasing
+    // any individual pad's own padDelayEnabled flag — turning it back ON
+    // restores exactly whichever pads had their own flag set. Reuses a
+    // PreferencesRepository field (loadDelayEnabled/saveDelayEnabled) that
+    // was already there but unused since delay became per-pad-per-kit.
+    var delayMasterEnabled by remember { mutableStateOf(PreferencesRepository.loadDelayEnabled()) }
     // NEW: LOOP group's SPEED control — global tempo-synced playback-rate
     // multiplier (0.5x..2x), separate from BPM.
     var speed by remember { mutableStateOf(PreferencesRepository.loadSpeed()) }
@@ -346,21 +358,22 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     var currentKit by remember { mutableStateOf(KitRepository.loadLastSelectedKit()) }
 
-    // ── A/B/C Bank: currentKit above is Bank A's kit. Bank B and Bank C each
-    // have their own kit slot; bankMode is a string containing any subset of
-    // the letters 'A'/'B'/'C' — every letter present layers that bank's
-    // sound on top of the others on a pad hit ("AB", "ABC", "C", etc.).
+    // ── A/B Bank: currentKit above is Bank A's kit. Bank B has its own kit
+    // slot; bankMode is a string containing any subset of the letters
+    // 'A'/'B' — every letter present layers that bank's sound on top of the
+    // others on a pad hit ("A", "B", "AB"). Bank C was removed entirely (it
+    // used to push the patch-list nav row off the bottom of this
+    // non-scrolling panel whenever it was active) — strip any leftover 'C'
+    // from a value persisted before the removal so an old install doesn't
+    // come back up in a now-nonexistent bank mode.
     var currentKitB by remember { mutableStateOf(PreferencesRepository.loadKitB()) }
-    var currentKitC by remember { mutableStateOf(PreferencesRepository.loadKitC()) }
-    var bankMode by remember { mutableStateOf(PreferencesRepository.loadBankMode()) }
+    var bankMode by remember { mutableStateOf(PreferencesRepository.loadBankMode().replace("C", "").ifEmpty { "A" }) }
 
     LaunchedEffect(currentKitB) { PreferencesRepository.saveKitB(currentKitB) }
-    LaunchedEffect(currentKitC) { PreferencesRepository.saveKitC(currentKitC) }
     LaunchedEffect(bankMode)    { PreferencesRepository.saveBankMode(bankMode) }
 
     LaunchedEffect(Unit) {
         if (currentKitB !in kits.indices) currentKitB = 0
-        if (currentKitC !in kits.indices) currentKitC = 0
     }
 
     // BUG FIX: the pad VOL/PITCH controls (and the matching MIDI CC handlers)
@@ -391,11 +404,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     fun bankKitIdx(): Int = when {
         'A' in bankMode -> currentKit
         'B' in bankMode -> currentKitB
-        'C' in bankMode -> currentKitC
         else -> currentKit
     }
 
-    // A/B/C Bank: which native slot(s) a logical pad (0-7) should sound/be
+    // A/B Bank: which native slot(s) a logical pad (0-7) should sound/be
     // controlled on for the current bankMode. Shared by onPadHit() (playback)
     // and the live VOLUME/PITCH MIDI CC handlers below, so both agree on
     // which native voice(s) a given bank selection actually maps to.
@@ -403,7 +415,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         val slots = mutableListOf<Int>()
         if ('A' in bankMode) slots.add(padIdx)
         if ('B' in bankMode) slots.add(padIdx + 8)
-        if ('C' in bankMode) slots.add(padIdx + 16)
         return if (slots.isEmpty()) listOf(padIdx) else slots
     }
 
@@ -446,6 +457,31 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 )
             }
         )
+    }
+
+    val scope = rememberCoroutineScope()
+
+    // BUG FIX: persistKits() serializes every kit slot (up to 200) to JSON
+    // synchronously — every continuous knob (VOLUME/PITCH/EQ/PAN/GAIN/DLY
+    // TIME/LENGTH, both on-screen drag AND MIDI CC) used to call it on EVERY
+    // single value change. A MIDI knob sweep can fire dozens of CC messages
+    // per second; calling this full-kits-list JSON serialize+disk-write on
+    // every one of them — synchronously, on the thread receiving MIDI or
+    // handling the touch drag — is exactly what read as "volume/pitch knob
+    // gets stuck after a while of testing, via MIDI and on the phone too".
+    // Debounced version used at every continuous-drag call site below:
+    // still saves the final value, just ~300ms after the last change instead
+    // of on every intermediate tick. One-shot actions (rename, swap, delete,
+    // explicit SAVE button, reverse/play-mode toggles) keep calling
+    // persistKits() directly — those aren't high-frequency, and should
+    // persist immediately.
+    var persistDebounceJob by remember { mutableStateOf<Job?>(null) }
+    fun persistKitsDebounced() {
+        persistDebounceJob?.cancel()
+        persistDebounceJob = scope.launch {
+            delay(300L)
+            persistKits()
+        }
     }
 
     LaunchedEffect(currentKit) {
@@ -503,8 +539,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // to update/clear the waveform — older hits become "background" sounds
     // that keep playing but no longer own the LCD display.
     var latestHitToken      by remember { mutableStateOf(0L) }
-
-    val scope        = rememberCoroutineScope()
 
     val padSounds = remember {
         sounds.toMutableList()
@@ -607,7 +641,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // together — e.g. "AC" plays Bank A's + Bank C's sound at once.
         // (nativeSlotsFor is now shared — declared above, near bankMode.)
         val bankSlots = nativeSlotsFor(index)
-        android.util.Log.d("PADHIT", "onPadHit called for index=$index vel=$effectiveVelocity")
+        // BUG FIX: this Log.d used to run synchronously on every single pad
+        // hit, before the trigger below — a real (if small) per-hit cost for
+        // zero shipped benefit (ProGuard/R8 is disabled per CLAUDE.md, so
+        // logging is never stripped from a release build either). Removed
+        // from this hot path along with the MIDI receive/CC-tick logging in
+        // MidiReceiver.kt and the per-CC-message latency logs above.
 
         // Tap-to-stop: a PLAY MODE = LOOP pad that's already actively holding
         // its loop gets silenced by a second tap instead of restarting the
@@ -687,7 +726,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             val bankKitIdxs = buildList {
                 if ('A' in bankMode) add(currentKit)
                 if ('B' in bankMode) add(currentKitB)
-                if ('C' in bankMode) add(currentKitC)
             }.filter { it in kits.indices }
 
             fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdxs.any { bankKit ->
@@ -717,9 +755,30 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             playbackDurationMs = durationToShow
             playbackPositionMs = 0L
 
+            // BUG FIX: delay's native params used to be synced only by a
+            // reactive LaunchedEffect keyed on `selectedPad` — a coroutine
+            // that doesn't actually run until the next recomposition frame,
+            // roughly a frame AFTER `selectedPad = index` gets set on tap.
+            // The trigger below fires synchronously, same call stack, before
+            // that frame — so the very first hit on a freshly-selected pad
+            // read whatever delay config was still live from the PREVIOUS
+            // pad, and only the second+ hit on the same pad (by which point
+            // the LaunchedEffect had caught up) got the correct one. That's
+            // exactly "first hit no delay, works after multiple hits on the
+            // same pad, breaks again on switching pads". Syncing synchronously
+            // here, for the pad actually being hit (`index`), not whichever
+            // pad happens to be selected in the UI, closes that gap.
+            val delayPadEnabled = if (bankKitIdx() in kits.indices)
+                kits[bankKitIdx()].padDelayEnabled.getOrElse(index) { false } else false
+            NativeBridge.setDelayEnabled(delayPadEnabled && delayMasterEnabled)
+            NativeBridge.setDelayParams(delayLevel, 1)
+            val delayMsForPad = if (bankKitIdx() in kits.indices)
+                kits[bankKitIdx()].padDelayMs.getOrElse(index) { 300 } else 300
+            NativeBridge.setDelayTapIntervalFrames(DrumEngine.sampleRate().toLong() * delayMsForPad.toLong() / 1000L)
+            NativeBridge.setDelayChokePad(delayChokePad)
+
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
-                    slot >= 16 -> currentKitC
                     slot >= 8  -> currentKitB
                     else       -> currentKit
                 }
@@ -755,7 +814,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 while (keepGoing) {
                     // SPEED (LOOP panel) scales the tempo-synced interval —
                     // >1x plays the beat grid faster, <1x slower, independent of BPM.
-                    val beatIntervalMs = ((60_000L / bpm.coerceAtLeast(1)) / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
+                    // BUG FIX: this used to divide as Long/Int first (`60_000L
+                    // / bpm`), truncating to a whole millisecond *before* the
+                    // Speed division was ever applied — e.g. at 127 BPM,
+                    // 60000/127 truncates to 472 instead of the true 472.44,
+                    // and every subsequent Speed scaling compounded that
+                    // rounding. Doing the whole calculation in Float first,
+                    // then truncating once at the very end, keeps BPM and
+                    // Speed both accurate instead of BPM silently losing
+                    // precision before Speed ever sees it.
+                    val beatIntervalMs = (60_000f / bpm.coerceAtLeast(1) / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
                     // BUG FIX: per-pad LOOP play mode used to be BPM-gated
                     // exactly like the global Loop toggle (wait for
                     // max(beatInterval, duration) before retriggering) — so
@@ -769,8 +837,21 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // only the explicit per-pad LOOP mode is now a true
                     // immediate back-to-back loop.
                     val currentMode = kits[bankKitIdx()].padPlayMode.getOrElse(index) { "ONESHOT" }
+                    // BUG FIX: per-pad LOOP mode used to ignore SPEED entirely
+                    // (always durationToShow, the sample's own raw length) —
+                    // meaning the LOOP panel's SPEED knob had literally zero
+                    // effect unless a pad was ONESHOT *and* the global Loop
+                    // toggle was on, which reads as "Speed control doesn't
+                    // work" for the very common case of testing it against a
+                    // PLAY MODE = LOOP pad. BPM is deliberately NOT applied
+                    // here — re-gating LOOP mode to the beat grid would
+                    // reintroduce the "silence gap" bug fixed above. Only the
+                    // sample's own natural gap is scaled by the playback-
+                    // rate-like SPEED multiplier, same idea as the beat-grid
+                    // scaling above, just applied to LOOP mode's own interval.
+                    val loopModeIntervalMs = (durationToShow / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
                     val waitWindowMs = when {
-                        currentMode == "LOOP" -> durationToShow
+                        currentMode == "LOOP" -> loopModeIntervalMs
                         effectiveLoop()        -> maxOf(beatIntervalMs, durationToShow)
                         else                    -> durationToShow
                     }
@@ -918,8 +999,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         }
     }
 
-    LaunchedEffect(curPadDelayEnabled, selectedPad, bankKitIdx(), delayChokePad, curPadDelayMs, delayLevel) {
-        NativeBridge.setDelayEnabled(curPadDelayEnabled)
+    LaunchedEffect(curPadDelayEnabled, selectedPad, bankKitIdx(), delayChokePad, curPadDelayMs, delayLevel, delayMasterEnabled) {
+        NativeBridge.setDelayEnabled(curPadDelayEnabled && delayMasterEnabled)
         NativeBridge.setDelayParams(delayLevel, 1)   // decay per tap (FX panel's DELAY LEVEL knob), 1 tap — client wants exactly 2 sounds total per hit (original + 1 echo)
         // BUG FIX: this used to hardcode 48000Hz to convert the DLY TIME knob
         // (ms) into frames, but AudioEngine deliberately opens the stream at
@@ -930,6 +1011,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         NativeBridge.setDelayTapIntervalFrames(sr * curPadDelayMs.toLong() / 1000L)
         NativeBridge.setDelayChokePad(delayChokePad)
     }
+
+    LaunchedEffect(delayMasterEnabled) { PreferencesRepository.saveDelayEnabled(delayMasterEnabled) }
 
     // Sync per-pad EQ+level to native whenever selected pad or kit changes
     val curPadLevel = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLevels[selectedPad] else 1f
@@ -1040,33 +1123,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         }
     }
 
-    // Bank C -> native slots 16-23, same pattern as Bank B.
-    LaunchedEffect(
-        currentKitC,
-        AudioRepository.audios.map {
-            Triple(
-                it.id,
-                it.assignedPad,
-                it.assignedKit
-            )
-        },
-        if (currentKitC in kits.indices) kits[currentKitC].padReverse.toList() else emptyList()
-    ) {
-        if (currentKitC in kits.indices) {
-            for (pad in 0 until 8) {
-                DrumEngine.loadPad(
-                    context,
-                    currentKitC,
-                    pad,
-                    kits[currentKitC].sounds[pad],
-                    reversed = kits[currentKitC].padReverse.getOrElse(pad) { false },
-                    nativeSlot = pad + 16
-                )
-            }
-        }
-    }
-
-
 
 
     LaunchedEffect(Unit) {
@@ -1102,22 +1158,24 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // same as onPadHit()/the on-screen sliders.
                     kits[bankKitIdx()].volumes[selectedPad] = newVolume
                     nativeSlotsFor(selectedPad).forEach { DrumEngine.setVolume(it, newVolume) }
-                    persistKits()   // NEW: save immediately so it survives app close
-
-                    // ✅ NEW: volume knob latency
-                    val volLatency = (System.nanoTime() - LatencyTracker.midiTime) / 1_000_000.0
-                    android.util.Log.d("LATENCY", "Pad ${selectedPad + 1} VOLUME → Latency = $volLatency ms")
+                    // BUG FIX: was persistKits() (a synchronous full-kits-list
+                    // JSON serialize + disk write) called on every single CC
+                    // tick — a fast knob sweep can send dozens of CC messages
+                    // per second, so this stacked expensive synchronous work
+                    // on the MIDI callback thread on every one of them. That's
+                    // what read as "volume/pitch knob gets stuck in MIDI after
+                    // testing for a while" — the callback thread falls further
+                    // behind the longer a sweep continues. Debounced version
+                    // still saves the final value, just ~300ms after the last
+                    // change instead of on every intermediate tick.
+                    persistKitsDebounced()
                 }
 
                 cc.getCc("PITCH") -> {
                     val newPitch = 0.5f + normalized * 1.5f
                     kits[bankKitIdx()].pitches[selectedPad] = newPitch
                     nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, newPitch) }
-                    persistKits()   // NEW: save immediately so it survives app close
-
-                    // ✅ NEW: pitch knob latency
-                    val pitchLatency = (System.nanoTime() - LatencyTracker.midiTime) / 1_000_000.0
-                    android.util.Log.d("LATENCY", "Pad ${selectedPad + 1} PITCH → Latency = $pitchLatency ms")
+                    persistKitsDebounced()
                 }
 
                 cc.getCc("EQ_LOW") -> {
@@ -1126,19 +1184,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // is actually active.
                     kits[bankKitIdx()].padEqLow[selectedPad] = normalized * 2f
                     NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
-                    persistKits()
+                    persistKitsDebounced()
                 }
 
                 cc.getCc("EQ_MID") -> {
                     kits[bankKitIdx()].padEqMid[selectedPad] = normalized * 2f
                     NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
-                    persistKits()
+                    persistKitsDebounced()
                 }
 
                 cc.getCc("EQ_HIGH") -> {
                     kits[bankKitIdx()].padEqHigh[selectedPad] = normalized * 2f
                     NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
-                    persistKits()
+                    persistKitsDebounced()
                 }
 
                 cc.getCc("PATCH_NEXT") -> {
@@ -1155,6 +1213,22 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 cc.getCc("SAVE") -> {
                     if (buttonPressed) persistKits()
+                }
+
+                cc.getCc("DELAY_TOGGLE") -> {
+                    if (buttonPressed) setCurPadDelayEnabled(!curPadDelayEnabled)
+                }
+
+                cc.getCc("BANK_A") -> {
+                    if (buttonPressed) bankMode = "A"
+                }
+
+                cc.getCc("BANK_B") -> {
+                    if (buttonPressed) bankMode = "B"
+                }
+
+                cc.getCc("BANK_AB") -> {
+                    if (buttonPressed) bankMode = "AB"
                 }
 
                 // Pad mapping is CC-only: note-based mapping was removed, so
@@ -1411,6 +1485,39 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         }?.first ?: -1
     }
 
+    // ── 2-finger hold gate for Swap/Mix/Add-to-Last ─────────────────────────
+    // A 2-finger press on a pad used to open the Swap/Mix/Add-to-Last menu
+    // the instant the fingers were lifted over a different pad — no hold
+    // required, so it fired on any quick 2-finger tap/brush, not just a
+    // deliberate drag. Now it only opens after the 2 fingers have been held
+    // down continuously for ~3.5s (within the 3-4s asked for); lifting
+    // before that cancels the pending job and the menu never appears at all.
+    fun beginTwoFingerHold(padNum: Int, startX: Float, startY: Float) {
+        dragVisible = true
+        dragPad = padNum
+        sourcePad = padNum
+        dragX = startX
+        dragY = startY
+        dragHoldJob?.cancel()
+        dragHoldJob = scope.launch {
+            delay(3500L)
+            targetPad = detectTargetPad()
+            dragVisible = false
+            if (targetPad != -1 && targetPad != sourcePad) {
+                showPadMenu = true
+            }
+        }
+    }
+
+    fun endTwoFingerHold() {
+        // A no-op if the hold already completed (job finished, menu already
+        // shown) — only actually cancels/hides anything for a hold that was
+        // released early, before the 3.5s gate elapsed.
+        dragHoldJob?.cancel()
+        dragHoldJob = null
+        dragVisible = false
+    }
+
     // BoxWithConstraints instead of Box: reading maxWidth lets the control
     // column (and every side panel that slides out from it) scale with the
     // actual screen instead of using one fixed dp width tuned for a single
@@ -1420,7 +1527,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     androidx.compose.foundation.layout.BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFFD0D0D0)),
+            .background(Color(0xFFD0D0D0))
+            // BUG FIX: fullscreen immersive mode (system bars hidden — see
+            // MainActivity.hideSystemBars()) plus no display-cutout handling
+            // meant a notch/camera-cutout was left to whatever each OEM
+            // defaults to, which isn't consistent — on some phones part of
+            // the fixed pad-grid/control-panel layout ended up letterboxed
+            // out or rendered under the cutout, reported as "full screen on
+            // some phones, half on others". windowInsetsPadding(displayCutout)
+            // here means `maxWidth`/`maxHeight` below (and therefore
+            // controlPanelWidth and every weighted child under it) are
+            // computed from the actual safe usable area on every device,
+            // not the raw screen size.
+            .windowInsetsPadding(WindowInsets.displayCutout),
         contentAlignment = Alignment.Center
     ) {
         // ~20% of the available width, clamped to a sane hardware-control-panel range.
@@ -1468,24 +1587,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(0)
                             },
                             onRelease = { pressedPads[0] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 1
-                                sourcePad = 1
-                                dragX = pad1X
-                                dragY = pad1Y
-                            },
+                            onDragStart = { beginTwoFingerHold(1, pad1X, pad1Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad1X = x
                                 pad1Y = y
@@ -1508,24 +1615,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(1)
                             },
                             onRelease = { pressedPads[1] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 2
-                                sourcePad = 2
-                                dragX = pad2X
-                                dragY = pad2Y
-                            },
+                            onDragStart = { beginTwoFingerHold(2, pad2X, pad2Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad2X = x
                                 pad2Y = y
@@ -1548,24 +1643,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(2)
                             },
                             onRelease = { pressedPads[2] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 3
-                                sourcePad = 3
-                                dragX = pad3X
-                                dragY = pad3Y
-                            },
+                            onDragStart = { beginTwoFingerHold(3, pad3X, pad3Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad3X = x
                                 pad3Y = y
@@ -1589,24 +1672,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(3)
                             },
                             onRelease = { pressedPads[3] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 4
-                                sourcePad = 4
-                                dragX = pad4X
-                                dragY = pad4Y
-                            },
+                            onDragStart = { beginTwoFingerHold(4, pad4X, pad4Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad4X = x
                                 pad4Y = y
@@ -1637,24 +1708,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(4)
                             },
                             onRelease = { pressedPads[4] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 5
-                                sourcePad = 5
-                                dragX = pad5X
-                                dragY = pad5Y
-                            },
+                            onDragStart = { beginTwoFingerHold(5, pad5X, pad5Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad5X = x
                                 pad5Y = y
@@ -1677,24 +1736,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(5)
                             },
                             onRelease = { pressedPads[5] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 6
-                                sourcePad = 6
-                                dragX = pad6X
-                                dragY = pad6Y
-                            },
+                            onDragStart = { beginTwoFingerHold(6, pad6X, pad6Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad6X = x
                                 pad6Y = y
@@ -1717,24 +1764,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(6)
                             },
                             onRelease = { pressedPads[6] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 7
-                                sourcePad = 7
-                                dragX = pad7X
-                                dragY = pad7Y
-                            },
+                            onDragStart = { beginTwoFingerHold(7, pad7X, pad7Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad7X = x
                                 pad7Y = y
@@ -1757,24 +1792,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                 onPadHit(7)
                             },
                             onRelease = { pressedPads[7] = false },
-                            onDragStart = {
-                                dragVisible = true
-                                dragPad = 8
-                                sourcePad = 8
-                                dragX = pad8X
-                                dragY = pad8Y
-                            },
+                            onDragStart = { beginTwoFingerHold(8, pad8X, pad8Y) },
                             onDragMove = { dx, dy ->
                                 dragX += dx
                                 dragY += dy
                             },
-                            onDragEnd = {
-                                targetPad = detectTargetPad()
-                                dragVisible = false
-                                if (targetPad != -1 && targetPad != sourcePad) {
-                                    showPadMenu = true
-                                }
-                            },
+                            onDragEnd = { endTwoFingerHold() },
                             onPadPositionChanged = { x, y ->
                                 pad8X = x
                                 pad8Y = y
@@ -1835,6 +1858,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onDelayChokePadChange = { delayChokePad = it },
                 delayLevel = delayLevel,
                 onDelayLevelChange = { delayLevel = it },
+                delayMasterEnabled = delayMasterEnabled,
+                onDelayMasterEnabledChange = { delayMasterEnabled = it },
                 speed = speed,
                 onSpeedChange = { speed = it },
                 masterLevel = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLevels[selectedPad] else 1f,
@@ -1845,28 +1870,28 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padLevels[selectedPad] = v
                         NativeBridge.setMasterLevel(v)
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 onEqLowChange = { v ->
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padEqLow[selectedPad] = v
                         NativeBridge.setEqBands(v, kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 onEqMidChange = { v ->
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padEqMid[selectedPad] = v
                         NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], v, kits[bankKitIdx()].padEqHigh[selectedPad])
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 onEqHighChange = { v ->
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padEqHigh[selectedPad] = v
                         NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], v)
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 delayTimeMs = if (bankKitIdx() in kits.indices)
@@ -1874,14 +1899,14 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onDelayTimeChange = { ms ->
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padDelayMs[selectedPad] = ms
-                        persistKits()   // volume/pitch ki tarah turant save
+                        persistKitsDebounced()
                     }
                 },
                 padLengthPct = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLengthPct[selectedPad] else 1f,
                 onPadLengthChange = { v ->
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padLengthPct[selectedPad] = v
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 padReverse = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padReverse[selectedPad] else false,
@@ -1904,7 +1929,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padPan[selectedPad] = v
                         nativeSlotsFor(selectedPad).forEach { DrumEngine.setPan(it, v) }
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 padGain = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padGain.getOrElse(selectedPad) { 1f } else 1f,
@@ -1912,7 +1937,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     if (bankKitIdx() in kits.indices) {
                         kits[bankKitIdx()].padGain[selectedPad] = v
                         nativeSlotsFor(selectedPad).forEach { DrumEngine.setGain(it, v) }
-                        persistKits()
+                        persistKitsDebounced()
                     }
                 },
                 onSaveClick = { persistKits() },
@@ -1925,9 +1950,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 kitBName = if (currentKitB in kits.indices) kits[currentKitB].name else "",
                 onKitBPrev = { if (currentKitB > 0) currentKitB-- },
                 onKitBNext = { if (currentKitB < kits.lastIndex) currentKitB++ },
-                kitCName = if (currentKitC in kits.indices) kits[currentKitC].name else "",
-                onKitCPrev = { if (currentKitC > 0) currentKitC-- },
-                onKitCNext = { if (currentKitC < kits.lastIndex) currentKitC++ },
                 selectedPad = selectedPad,
                 // BUG FIX: read/write the kit for the CURRENTLY SELECTED BANK
                 // (bankKitIdx()), not always Bank A's currentKit — see the
@@ -1938,12 +1960,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 onVolumeChange = {
                     kits[bankKitIdx()].volumes[selectedPad] = it
-                    persistKits()   // NEW: save immediately so it survives app close
+                    persistKitsDebounced()
                 },
 
                 onPitchChange = {
                     kits[bankKitIdx()].pitches[selectedPad] = it
-                    persistKits()   // NEW: save immediately so it survives app close
+                    persistKitsDebounced()
                 },
                 kits          = kits,
                 currentKit    = currentKit,
@@ -2103,6 +2125,35 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
         if (showRenameDialog) {
 
+            fun saveRenamedKit() {
+                if (newKitName.isNotBlank()) {
+
+                    val alreadyExists = kits.anyIndexed { index, kit ->
+                        index != currentKit &&
+                                kit.name.equals(
+                                    newKitName.trim(),
+                                    ignoreCase = true
+                                )
+                    }
+
+                    if (alreadyExists) {
+                        android.widget.Toast.makeText(
+                            context,
+                            "Kit name must be unique",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        return
+                    }
+
+                    kits[currentKit] = kits[currentKit].copy(
+                        name = newKitName.trim()
+                    )
+                    persistKits()
+                }
+
+                showRenameDialog = false
+            }
+
             DisposableEffect(Unit) {
                 com.example.myapplication.KeyboardPlayState.textInputActive = true
                 onDispose { com.example.myapplication.KeyboardPlayState.textInputActive = false }
@@ -2122,7 +2173,22 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 },
 
                 title = {
-                    androidx.compose.material3.Text("Rename Kit")
+                    androidx.compose.foundation.layout.Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        androidx.compose.material3.Text("Rename Kit")
+                        // Keyboard covers the bottom SAVE button once typing
+                        // starts (imePadding keeps the dialog itself on
+                        // screen, but the text field can still push the
+                        // confirm button below the visible area) — a second
+                        // SAVE action up here next to the title is always
+                        // reachable regardless of keyboard height.
+                        TextButton(onClick = { saveRenamedKit() }) {
+                            androidx.compose.material3.Text("SAVE")
+                        }
+                    }
                 },
 
                 text = {
@@ -2138,39 +2204,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 },
 
                 confirmButton = {
-                    TextButton(
-                        onClick = {
-
-                            if (newKitName.isNotBlank()) {
-
-                                val alreadyExists = kits.anyIndexed { index, kit ->
-                                    index != currentKit &&
-                                            kit.name.equals(
-                                                newKitName.trim(),
-                                                ignoreCase = true
-                                            )
-                                }
-
-                                if (alreadyExists) {
-
-                                    android.widget.Toast.makeText(
-                                        context,
-                                        "Kit name must be unique",
-                                        android.widget.Toast.LENGTH_SHORT
-                                    ).show()
-
-                                    return@TextButton
-                                }
-
-                                kits[currentKit] = kits[currentKit].copy(
-                                    name = newKitName.trim()
-                                )
-                                persistKits()
-                            }
-
-                            showRenameDialog = false
-                        }
-                    ) {
+                    TextButton(onClick = { saveRenamedKit() }) {
                         androidx.compose.material3.Text("SAVE")
                     }
                 },

@@ -53,11 +53,13 @@ object PreferencesRepository {
 
     fun loadLoopEnabled(): Boolean = prefs()?.getBoolean(KEY_LOOP_ENABLED, false) ?: false
 
+    // Global delay MASTER kill switch (DelayPanel.kt) — defaults to on so it
+    // never silently mutes a pad's own delay flag for anyone upgrading.
     fun saveDelayEnabled(enabled: Boolean) {
         prefs()?.edit()?.putBoolean(KEY_DELAY_ENABLED, enabled)?.apply()
     }
 
-    fun loadDelayEnabled(): Boolean = prefs()?.getBoolean(KEY_DELAY_ENABLED, false) ?: false
+    fun loadDelayEnabled(): Boolean = prefs()?.getBoolean(KEY_DELAY_ENABLED, true) ?: true
 
     fun saveDelayChokePad(padIndex: Int) {
         prefs()?.edit()?.putInt(KEY_DELAY_CHOKE_PAD, padIndex)?.apply()

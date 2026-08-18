@@ -13,9 +13,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.VpnKey
@@ -87,14 +84,12 @@ fun ActivationScreen(onActivated: () -> Unit) {
     var name by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var code by remember { mutableStateOf("") }
-    var showAdvanced by remember { mutableStateOf(serverUrl.isBlank()) }
 
     var loading by remember { mutableStateOf(false) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
 
     val nameFocus = remember { FocusRequester() }
     val phoneFocus = remember { FocusRequester() }
-    val urlFocus = remember { FocusRequester() }
 
     DisposableEffect(Unit) {
         KeyboardPlayState.textInputActive = true
@@ -224,45 +219,10 @@ fun ActivationScreen(onActivated: () -> Unit) {
                     onChange = { phone = it },
                     keyboardType = KeyboardType.Phone,
                     leadingIcon = Icons.Filled.Phone,
-                    imeAction = if (showAdvanced) ImeAction.Next else ImeAction.Done,
+                    imeAction = ImeAction.Done,
                     focusRequester = phoneFocus,
-                    onNext = { urlFocus.requestFocus() },
                     onDone = { submit() }
                 )
-
-                Spacer(Modifier.height(14.dp))
-
-                // Advanced: server URL — collapsed once set, since most users
-                // only ever configure this once (or it ships pre-set by you).
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .pointerInput(Unit) { detectTapGestures { showAdvanced = !showAdvanced } },
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        if (showAdvanced) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowRight,
-                        contentDescription = null, tint = TextFaint, modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Text(
-                        "SERVER URL${if (!showAdvanced && serverUrl.isNotBlank()) " (set)" else ""}",
-                        color = TextFaint, fontSize = 10.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
-                    )
-                }
-                if (showAdvanced) {
-                    Spacer(Modifier.height(8.dp))
-                    Field(
-                        label = "ADMIN PANEL URL",
-                        value = serverUrl,
-                        onChange = { serverUrl = it },
-                        placeholder = "https://your-app.vercel.app",
-                        leadingIcon = Icons.Filled.Language,
-                        imeAction = ImeAction.Done,
-                        focusRequester = urlFocus,
-                        onDone = { submit() }
-                    )
-                }
 
                 Spacer(Modifier.height(18.dp))
 

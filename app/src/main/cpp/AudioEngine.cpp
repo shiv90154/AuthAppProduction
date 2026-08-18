@@ -229,6 +229,7 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
                 v.pan.store(pan, std::memory_order_relaxed);
                 v.gain.store(gain, std::memory_order_relaxed);
                 v.releaseGain = 1.0f;
+                v.attackGain = 0.0f;
                 v.releasing.store(false, std::memory_order_release);
                 v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
                                   std::memory_order_relaxed);
@@ -412,6 +413,9 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
                         v.lengthFraction.store(1.0f, std::memory_order_relaxed);
                         v.pan.store(it->pan, std::memory_order_relaxed);
                         v.gain.store(it->gain, std::memory_order_relaxed);
+                        v.releaseGain = 1.0f;
+                        v.attackGain = 0.0f;
+                        v.releasing.store(false, std::memory_order_release);
                         v.claimSeq.store(voiceClaimCounter_.fetch_add(1, std::memory_order_relaxed),
                                           std::memory_order_relaxed);
                         v.ready.store(true, std::memory_order_release);
@@ -483,6 +487,14 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             // instant cut, so a fast retrigger never produces a click/pop.
             bool isReleasing = v.releasing.load(std::memory_order_relaxed);
             const float releaseStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.005f);
+            // Fade-IN: ~3ms linear ramp from silence instead of starting at
+            // full amplitude on frame 0 (rarely a zero-crossing sample) —
+            // same click-avoidance idea as releaseStep above, applied to the
+            // start of a voice instead of the end. attackGain is only ever
+            // < 1.0 for the first ~3ms after a fresh claim (see triggerPad/
+            // fireDelayTaps), so this is a no-op for every already-playing
+            // voice.
+            const float attackStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.003f);
 
             for (int32_t i = 0; i < numFrames; i++) {
                 int64_t idx = static_cast<int64_t>(v.position);
@@ -502,6 +514,11 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
                         break;
                     }
                     frameGain = v.releaseGain;
+                }
+                if (v.attackGain < 1.0f) {
+                    v.attackGain += attackStep;
+                    if (v.attackGain > 1.0f) v.attackGain = 1.0f;
+                    frameGain *= v.attackGain;
                 }
 
                 double frac = v.position - idx;

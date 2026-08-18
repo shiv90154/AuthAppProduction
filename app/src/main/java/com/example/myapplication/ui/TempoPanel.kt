@@ -127,6 +127,13 @@ fun TempoPanel(
                         BpmStepButton("RESET") { onSpeedChange(1f) }
                         BpmStepButton("+10%") { onSpeedChange((speed + 0.1f).coerceIn(0.5f, 2f)) }
                     }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Scales BPM-synced Loop retriggers and per-pad LOOP mode",
+                        color = TempoTextMuted, fontSize = 8.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
 

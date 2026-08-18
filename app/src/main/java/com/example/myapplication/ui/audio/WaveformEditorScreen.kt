@@ -1,6 +1,10 @@
 package com.example.myapplication.ui.audio
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -36,6 +40,7 @@ import com.example.myapplication.ui.BtnActive
 import com.example.myapplication.ui.PanelBg
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -60,9 +65,14 @@ import kotlin.math.sqrt
  *  - Delete region: tap "DEL REGION", then single-finger drag to select a
  *    middle section to cut
  *  - Millisecond-precision display
- *  - Autosave: crop/delete edits commit the instant the gesture ends
- *    (finger lift), written back to a new file + AudioRepository
- *    automatically — no explicit "Save" button, no artificial delay
+ *  - PREVIEW: plays back just the current (unsaved) selection so you can
+ *    hear it before committing
+ *  - APPLY: crop/delete edits are NOT written until this is tapped
+ *    explicitly — dragging the waveform only adjusts the on-screen
+ *    selection. (Previously this autosaved the instant a drag gesture
+ *    ended, so a single accidental touch on the canvas permanently
+ *    overwrote the original sample with no way back — that's why this is
+ *    now an explicit two-step: drag/preview, then Apply.)
  *
  * @param kitIndex    current active kit
  * @param padIndex    which pad (0-7) is being edited
@@ -125,18 +135,21 @@ fun WaveformEditorScreen(
     // Saving state
     var isSaving by remember { mutableStateOf(false) }
     var saveMsg by remember { mutableStateOf<String?>(null) }
-    // Set true by any user-driven crop/delete/reset change so the autosave
-    // effect below knows there's something worth persisting — the initial
-    // PCM load also writes cropStartMs/cropEndMs (full range) and must NOT
-    // trigger a save of its own.
+    // Set true by any user-driven crop/delete change so the APPLY button
+    // knows there's an unsaved selection — the initial PCM load also writes
+    // cropStartMs/cropEndMs (full range) and must NOT count as an edit.
     var hasUserEdited by remember { mutableStateOf(false) }
-    // Bumped exactly once per completed gesture that changed the crop/delete
-    // region (see WaveformEditorCanvas's onRegionCommit) — the autosave
-    // LaunchedEffect below is keyed on this instead of on cropStartMs/
-    // cropEndMs/etc. directly, so it fires exactly once right when the
-    // user's finger lifts, not on every intermediate value a live drag
-    // writes and not after some arbitrary idle timeout.
-    var commitTick by remember { mutableStateOf(0) }
+
+    val scope = rememberCoroutineScope()
+    var previewTrack by remember { mutableStateOf<AudioTrack?>(null) }
+    var isPreviewing by remember { mutableStateOf(false) }
+
+    // Stop any in-flight preview the instant this screen goes away, so a
+    // closed editor never leaves an AudioTrack playing/leaking in the
+    // background.
+    DisposableEffect(Unit) {
+        onDispose { previewTrack?.let { it.stop(); it.release() } }
+    }
 
     // ── Load PCM on entry ──────────────────────────────────────────────────────
     // BUG FIX: this used to hard-block editing entirely whenever the pad had
@@ -176,20 +189,17 @@ fun WaveformEditorScreen(
         }
     }
 
-    // ── Autosave crop/delete edits ─────────────────────────────────────────────
-    // Replaces the old "SAVE EDITS" button. Live-dragging a region only ever
-    // updates local UI state (cheap, instant, no encode) — this effect is
-    // keyed on commitTick, which WaveformEditorCanvas bumps exactly once,
-    // exactly when a region-drag gesture ends (finger lift), so the actual
-    // encode+persist (MediaCodec AAC encode, AudioRepository, DrumEngine
-    // reload) runs once per completed edit with no artificial delay, not on
-    // a fixed idle timeout and never on intermediate drag frames.
-    LaunchedEffect(commitTick) {
-        if (!hasUserEdited || pcmResult == null) return@LaunchedEffect
+    // ── Apply crop/delete edits ─────────────────────────────────────────────
+    // Explicit commit, run only when the user taps APPLY — dragging the
+    // waveform (onCropRegion/onDeleteRegion below) only ever updates local
+    // UI state. This used to run automatically the instant a drag gesture
+    // ended, which meant one accidental touch on the canvas silently
+    // overwrote the original sample with no confirmation and no way back.
+    suspend fun applyPending() {
+        val result = pcmResult ?: return
         saveMsg = null
         isSaving = true
         try {
-            val result = pcmResult!!
             val editedFile = applyEdits(
                 context = context,
                 pcm = result,
@@ -214,10 +224,6 @@ fun WaveformEditorScreen(
             DrumEngine.invalidatePad(padIndex)
             DrumEngine.loadPad(context, kitIndex, padIndex, factoryResId)
             saveMsg = "Saved"
-            // Mark clean BEFORE touching crop/delete state below — those
-            // resets are themselves keys of this same effect, and clearing
-            // the flag first means the relaunch they trigger bails out
-            // immediately instead of re-encoding the just-saved audio again.
             hasUserEdited = false
             // Refresh pcm + amplitudes for the newly saved audio, and reset
             // the crop/delete range to match its (now full) extent.
@@ -236,6 +242,56 @@ fun WaveformEditorScreen(
             saveMsg = "Error: ${e.message}"
         } finally {
             isSaving = false
+        }
+    }
+
+    // ── Preview the current (unsaved) selection ─────────────────────────────
+    // Plays the crop/delete selection directly from the in-memory PCM via
+    // AudioTrack — no file write, no encode — so the user can hear exactly
+    // what APPLY would commit before actually committing it.
+    fun previewSelection() {
+        val result = pcmResult ?: return
+        previewTrack?.let { it.stop(); it.release() }
+        previewTrack = null
+        val samples = stitchEditedPcm(
+            pcm = result,
+            cropStartMs = cropStartMs,
+            cropEndMs = cropEndMs,
+            deleteStartMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteStartMs else -1L,
+            deleteEndMs = if (deleteStartMs >= 0 && deleteEndMs > deleteStartMs) deleteEndMs else -1L
+        )
+        if (samples.isEmpty()) return
+
+        val channelConfig = if (result.channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
+        val minBufSize = AudioTrack.getMinBufferSize(result.sampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT)
+        val track = AudioTrack(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build(),
+            AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(result.sampleRate)
+                .setChannelMask(channelConfig)
+                .build(),
+            maxOf(minBufSize, samples.size * 2),
+            AudioTrack.MODE_STATIC,
+            AudioManager.AUDIO_SESSION_ID_GENERATE
+        )
+        track.write(samples, 0, samples.size)
+        track.play()
+        previewTrack = track
+        isPreviewing = true
+
+        val durationSec = samples.size.toFloat() / result.channels / result.sampleRate
+        scope.launch {
+            delay((durationSec * 1000).toLong() + 100L)
+            if (previewTrack === track) {
+                track.stop()
+                track.release()
+                previewTrack = null
+                isPreviewing = false
+            }
         }
     }
 
@@ -406,10 +462,11 @@ fun WaveformEditorScreen(
                             deleteEndMs = e.coerceIn(cropStartMs, cropEndMs)
                             hasUserEdited = true
                         },
-                        // Fires exactly once when a region-drag gesture ends —
-                        // this, not a value-change debounce, is what actually
-                        // triggers the autosave (see the commitTick effect above).
-                        onRegionCommit = { commitTick++ },
+                        // Region-drag gestures no longer autosave anything —
+                        // they only ever update the in-memory selection above
+                        // (onCropRegion/onDeleteRegion). Nothing is written to
+                        // disk until APPLY is tapped explicitly.
+                        onRegionCommit = {},
                         onZoomScroll = { scale, offsetFrac ->
                             zoom = (zoom * scale).coerceIn(1f, 32f)
                             scrollFrac = offsetFrac.coerceIn(0f, 1f - 1f / zoom)
@@ -447,15 +504,30 @@ fun WaveformEditorScreen(
                     Spacer(Modifier.height(8.dp))
 
                     // ── Action buttons ──────────────────────────────────────────
-                    // No separate "Save Edits" button — crop/delete edits commit
-                    // automatically the instant a region-drag gesture ends (see
-                    // the commitTick-keyed LaunchedEffect above). Reset is the
-                    // only explicit action left, and bumps commitTick itself
-                    // since it doesn't go through the canvas gesture.
+                    // PREVIEW listens to the current unsaved selection.
+                    // RESET only clears the on-screen selection — nothing was
+                    // saved yet, so there's nothing to undo on disk. APPLY is
+                    // the only action that actually writes the edit; it's
+                    // disabled until there's a pending change to commit.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF1A1A1A))
+                                .pointerInput(Unit) {
+                                    detectTapGestures { previewSelection() }
+                                }
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(if (isPreviewing) "▶ PLAYING…" else "▶ PREVIEW",
+                                color = Color(0xFF00E5FF), fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold)
+                        }
                         Box(
                             modifier = Modifier
                                 .weight(1f)
@@ -470,14 +542,7 @@ fun WaveformEditorScreen(
                                         zoom = 1f
                                         scrollFrac = 0f
                                         saveMsg = null
-                                        // Persist the reset too — otherwise the pad would
-                                        // keep playing whatever crop was last autosaved
-                                        // while the UI shows a misleadingly "full" range.
-                                        // commitTick must be bumped explicitly here since
-                                        // autosave is now gesture-driven, not triggered by
-                                        // cropStartMs/cropEndMs simply changing value.
-                                        hasUserEdited = true
-                                        commitTick++
+                                        hasUserEdited = false
                                     }
                                 }
                                 .padding(vertical = 12.dp),
@@ -486,9 +551,24 @@ fun WaveformEditorScreen(
                             Text("RESET", color = Color(0xFF888888), fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold)
                         }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (hasUserEdited) Color(0xFF0D3D2A) else Color(0xFF1A1A1A))
+                                .pointerInput(hasUserEdited) {
+                                    detectTapGestures {
+                                        if (hasUserEdited && !isSaving) scope.launch { applyPending() }
+                                    }
+                                }
+                                .padding(vertical = 12.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("APPLY", color = if (hasUserEdited) Color(0xFF66FFAA) else Color(0xFF555555),
+                                fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
 
-                    // Autosave status
                     if (isSaving || saveMsg != null) {
                         Spacer(Modifier.height(6.dp))
                         Text(
@@ -847,6 +927,34 @@ private suspend fun applyEdits(
     originalName: String
 ): File = withContext(Dispatchers.IO) {
 
+    val outSamples = stitchEditedPcm(pcm, cropStartMs, cropEndMs, deleteStartMs, deleteEndMs)
+
+    // Encode to AAC m4a using MediaCodec
+    val outFile = File(
+        context.cacheDir,
+        "edit_${originalName}_${System.currentTimeMillis()}.m4a"
+    )
+    encodePcmToM4a(
+        samples   = outSamples,
+        channels  = pcm.channels,
+        sampleRate = pcm.sampleRate,
+        outFile   = outFile
+    )
+    outFile
+}
+
+/**
+ * Stitches crop + optional delete into a single output PCM (primitive
+ * ShortArray, no encode) — shared by applyEdits (encodes to file) and the
+ * in-editor PREVIEW playback (plays straight from memory via AudioTrack).
+ */
+private fun stitchEditedPcm(
+    pcm: PcmResult,
+    cropStartMs: Long,
+    cropEndMs: Long,
+    deleteStartMs: Long,  // -1 = no delete
+    deleteEndMs: Long
+): ShortArray {
     val channels   = pcm.channels
     val sampleRate = pcm.sampleRate
 
@@ -858,12 +966,10 @@ private suspend fun applyEdits(
     val delStartFrame   = if (deleteStartMs >= 0) msToFrame(deleteStartMs) else -1L
     val delEndFrame     = if (deleteStartMs >= 0) msToFrame(deleteEndMs)   else -1L
 
-    // Build output PCM by stitching segments. PERF: this used to build a
-    // MutableList<Short>, boxing every single sample (hundreds of thousands
-    // to millions on a multi-second clip) — with autosave now running after
-    // nearly every crop drag, that boxing/GC churn was the main source of
-    // encode latency. A preallocated ShortArray + arraycopy is a straight
-    // primitive-memory copy instead.
+    // Build output PCM by stitching segments. PERF: a preallocated
+    // ShortArray + arraycopy instead of boxing every sample into a
+    // MutableList<Short> (hundreds of thousands to millions on a
+    // multi-second clip).
     fun rangeIndices(fromFrame: Long, toFrame: Long): IntRange {
         val fromIdx = (fromFrame * channels).toInt().coerceIn(0, pcm.pcm.size)
         val toIdx   = (toFrame   * channels).toInt().coerceIn(0, pcm.pcm.size)
@@ -888,19 +994,7 @@ private suspend fun applyEdits(
         System.arraycopy(pcm.pcm, range.first, outSamples, writeIdx, len)
         writeIdx += len
     }
-
-    // Encode to AAC m4a using MediaCodec
-    val outFile = File(
-        context.cacheDir,
-        "edit_${originalName}_${System.currentTimeMillis()}.m4a"
-    )
-    encodePcmToM4a(
-        samples   = outSamples,
-        channels  = channels,
-        sampleRate = sampleRate,
-        outFile   = outFile
-    )
-    outFile
+    return outSamples
 }
 
 /**

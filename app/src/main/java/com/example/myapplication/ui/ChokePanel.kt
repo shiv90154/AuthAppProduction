@@ -42,7 +42,13 @@ private val ChokeTextWht   = Color(0xFFEEEEEE)
  * lives here too now, since it has no meaning on its own without choke
  * levels to assign — VELOCITY stays in FX since it's unrelated.
  *
- * 6 choke levels, same as before — not changed, just relocated.
+ * Levels are None/1/2/3/4 (trimmed down from 1..6) and a pad belongs to at
+ * most ONE level at a time now — picking a level for a pad is a single
+ * choice, not a multi-select toggle. "CHOKE LEVELS" below is organized as
+ * one collapsible folder per level (1-4): collapsed it just shows which
+ * pads are currently assigned, tap to expand and change that level's
+ * pads — instead of one long list showing every level's full pad grid at
+ * once.
  */
 @Composable
 fun ChokePanel(
@@ -56,6 +62,9 @@ fun ChokePanel(
     onClose: () -> Unit,
     width: androidx.compose.ui.unit.Dp = 220.dp
 ) {
+    // Which level's folder is currently expanded (null = all collapsed).
+    // Only one open at a time keeps the panel from growing unbounded.
+    var expandedLevel by remember { mutableStateOf<Int?>(null) }
     AnimatedVisibility(
         visible = visible,
         enter   = slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(220)) + fadeIn(tween(220)),
@@ -143,21 +152,32 @@ fun ChokePanel(
                         Text("ACTIVE LEVEL", color = ChokeTextWht, fontSize = 9.sp,
                              fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
                         Text(
-                            if (activeChokeLevel != 0) "Level $activeChokeLevel is live" else "No level active — tap one below",
+                            if (activeChokeLevel != 0) "Level $activeChokeLevel is live" else "None — pick a level below",
                             color = if (activeChokeLevel != 0) ChokeAccent else ChokeTextMuted, fontSize = 8.sp
                         )
                         Spacer(Modifier.height(2.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            (1..6).forEach { level ->
+                            // NEW: None/1/2/3/4 — trimmed from 1..6, and NONE
+                            // is now an explicit tappable option instead of
+                            // only being reachable by tapping an already-
+                            // active level to deselect it. onSelectActiveChokeLevel
+                            // toggles (sets to 0 if the same level is already
+                            // active, otherwise sets that level) — calling it
+                            // with 0 always lands on 0 either way (0==0 stays
+                            // 0; anything else != 0 so it sets to 0), so NONE
+                            // just calls it directly, same as every other tile.
+                            listOf(0, 1, 2, 3, 4).forEach { level ->
                                 val selected = level == activeChokeLevel
                                 Box(
                                     modifier = Modifier.weight(1f).height(28.dp).clip(RoundedCornerShape(6.dp))
                                         .background(if (selected) ChokeGreen else Color(0xFF2A2A2A))
-                                        .clickable(remember { MutableInteractionSource() }, null) { onSelectActiveChokeLevel(level) },
+                                        .clickable(remember { MutableInteractionSource() }, null) {
+                                            onSelectActiveChokeLevel(level)
+                                        },
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Text("$level", color = if (selected) Color.Black else ChokeTextMuted,
-                                         fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                    Text(if (level == 0) "NONE" else "$level", color = if (selected) Color.Black else ChokeTextMuted,
+                                         fontSize = if (level == 0) 8.sp else 10.sp, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }
@@ -166,26 +186,56 @@ fun ChokePanel(
                     Column(
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
                             .background(ChokePanelBg).padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text("CHOKE LEVELS", color = ChokeTextWht, fontSize = 9.sp,
                              fontWeight = FontWeight.Bold, letterSpacing = 0.8.sp)
-                        Text("Pick which pads belong to each level", color = ChokeTextMuted, fontSize = 8.sp)
-                        (1..6).forEach { level ->
-                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                Text("LEVEL $level", color = ChokeAccent, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    (0..7).forEach { padIndex ->
-                                        val sel = level in allPadChokeGroups[padIndex]
-                                        Box(
-                                            modifier = Modifier.weight(1f).height(24.dp)
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(if (sel) ChokeAccent else Color(0xFF2A2A2A))
-                                                .clickable(remember { MutableInteractionSource() }, null) { onToggleChokeGroup(padIndex, level) },
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Text("${padIndex + 1}", color = if (sel) Color.Black else ChokeTextMuted,
-                                                 fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                        Text("Each pad belongs to at most one level — tap a folder to open it", color = ChokeTextMuted, fontSize = 8.sp)
+                        (1..4).forEach { level ->
+                            val padsInLevel = (0..7).filter { pad -> level in allPadChokeGroups[pad] }
+                            val isOpen = expandedLevel == level
+                            Column(
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+                                    .background(Color(0xFF141414))
+                            ) {
+                                // Folder header — tap to expand/collapse.
+                                Row(
+                                    modifier = Modifier.fillMaxWidth()
+                                        .clickable(remember { MutableInteractionSource() }, null) {
+                                            expandedLevel = if (isOpen) null else level
+                                        }
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column {
+                                        Text("LEVEL $level", color = ChokeAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                        Text(
+                                            if (padsInLevel.isEmpty()) "No pads"
+                                            else "Pad " + padsInLevel.joinToString(", ") { (it + 1).toString() },
+                                            color = ChokeTextMuted, fontSize = 8.sp
+                                        )
+                                    }
+                                    Text(if (isOpen) "▲" else "▼", color = ChokeTextMuted, fontSize = 9.sp)
+                                }
+
+                                if (isOpen) {
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        (0..7).forEach { padIndex ->
+                                            val sel = level in allPadChokeGroups[padIndex]
+                                            Box(
+                                                modifier = Modifier.weight(1f).height(24.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(if (sel) ChokeAccent else Color(0xFF2A2A2A))
+                                                    .clickable(remember { MutableInteractionSource() }, null) { onToggleChokeGroup(padIndex, level) },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Text("${padIndex + 1}", color = if (sel) Color.Black else ChokeTextMuted,
+                                                     fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                            }
                                         }
                                     }
                                 }

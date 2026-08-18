@@ -35,19 +35,20 @@ An 8-pad drum sampler, similar in spirit to a Roland SPD or apps like Koala Samp
 - 8 touch pads, multi-touch, LED glow on press (top or bottom depending on row)
 - Velocity sensitivity **from MIDI** (hit strength → volume). Touch pads always fire at full velocity — Android touchscreens don't reliably report pressure, so this is a hardware limitation, not a missing feature.
 - Per-pad Reverse toggle
-- Per-pad play mode: ONE SHOT / LOOP (immediate back-to-back retrigger, independent of BPM) / MIX (layers repeated hits instead of cutting off)
-- Choke groups: 6 independent levels, any pad can belong to any subset of levels; one "active" level at a time silences every other pad sharing it
-- 2-finger drag to Swap / Mix (merges two pads' audio into one) / Add-to-End (concatenates two pads) — all three work on **factory kit sounds**, not just custom-imported audio
-- Waveform crop editor (`WaveformEditorScreen.kt`) — a single pointer-count-aware gesture recognizer: one finger drags out the kept (crop) or cut (delete) region, two-plus fingers pinch-zoom/pan with inertia on release; the two never overlap or fight over the same touch. Also works on factory kit sounds now, not just custom audio. Edits autosave the instant the gesture ends (finger lift) — no separate "Save" button, no artificial delay
+- Per-pad play mode: ONE SHOT / LOOP (immediate back-to-back retrigger, scaled by the SPEED multiplier, independent of BPM) / MULTIPLAY (layers repeated hits instead of cutting off — formerly labeled "MIX")
+- **Choke**: None/1/2/3/4 levels (trimmed down from an earlier 6-level design) — a pad belongs to at most **one** level at a time (dropdown-style single choice, not a multi-select set); one "active" level at a time silences every other pad sharing it. `ChokePanel.kt` (its own top-level button next to CROP/DELAY) shows level assignment as 4 collapsible per-level folders — collapsed, a folder just lists which pads are in it; tap to expand and change.
+- 2-finger drag to Swap / Mix (merges two pads' audio into one) / Add-to-End (concatenates two pads) — all three work on **factory kit sounds**, not just custom-imported audio. The menu only opens after the 2 fingers are held down continuously for ~3.5s; releasing before that cancels it and the menu never appears (a quick 2-finger tap/brush used to open it by accident).
+- Waveform crop editor (`WaveformEditorScreen.kt`) — a single pointer-count-aware gesture recognizer: one finger drags out the kept (crop) or cut (delete) region, two-plus fingers pinch-zoom/pan with inertia on release; the two never overlap or fight over the same touch. Also works on factory kit sounds, not just custom audio. **Nothing is written to disk until an explicit APPLY button is tapped** — dragging only updates the on-screen selection (this used to autosave the instant a drag gesture ended, so one accidental touch could permanently overwrite the original sample). A PREVIEW button plays the current unsaved selection straight from in-memory PCM (`AudioTrack`, no file write) so it can be heard before committing.
 
 **Audio**
 - WAV/MP3/OGG/M4A/FLAC import, or audio extracted from a video file
-- Per-pad Volume (0–200%), Pitch, 3-band EQ (Low/Mid/High), Delay (per-pad time, live-adjustable — the DLY TIME knob actually updates the running engine now, not just on the next pad switch), **Length** (trims how much of the sample plays, independent of pitch)
+- Per-pad Volume (0–200%), Pitch, 3-band EQ (Low/Mid/High), **Delay** (per-pad on/off + time + level, live-adjustable — see DELAY panel below), **Length** (trims how much of the sample plays, independent of pitch), Pan (-1..1, equal-power law), Gain (0–200% trim)
 - Internal mic recording straight onto a pad, with proper failure handling if the mic is busy with another app (shows a toast instead of silently doing nothing or crashing)
-- LOOP panel: BPM + SPEED multiplier, global LOOP toggle, and a CHOKE quick-toggle (shortcut to the same Exclusive Mode state the dedicated CHOKE panel uses). No metronome click or beat counter — both were removed entirely.
+- **DELAY panel** (`DelayPanel.kt`, its own top-level button next to CROP/CHOKE) — a global MASTER on/off kill switch layered on top of each pad's own per-kit DELAY on/off flag: MASTER off mutes delay everywhere instantly without touching any pad's individual setting, MASTER back on restores exactly whichever pads had theirs on. Also holds DLY TIME, DLY LEVEL, and the "apply to" pad picker (moved out of the FX panel into its own dedicated panel).
+- LOOP panel: BPM + SPEED multiplier (now actually scales true per-pad LOOP-mode retriggering, not just the BPM-gated global Loop toggle), global LOOP toggle, and a CHOKE quick-toggle (shortcut to the same Exclusive Mode state the dedicated CHOKE panel uses). No metronome click or beat counter — both were removed entirely.
 
 **Banks**
-- **A / B / C banks** — each is its own kit slot loaded in parallel (24 native audio slots total: 0–7 = A, 8–15 = B, 16–23 = C). Any combination of A/B/C can be toggled on at once; every active bank's sound layers together on a pad hit.
+- **A / B banks** — each is its own kit slot loaded in parallel (native audio slots 0–7 = A, 8–15 = B). Bank C was removed entirely (it used to push the patch-list nav row off the bottom of the non-scrolling control panel whenever active); the native engine still reserves 24 pad slots, 16–23 are simply unused now. A, B, or both (A+B) can be active at once; every active bank's sound layers together on a pad hit.
 
 **Kit system**
 - Up to 200 kits, 25 factory kits pre-loaded (200 WAV files bundled in `res/raw`)
@@ -57,7 +58,7 @@ An 8-pad drum sampler, similar in spirit to a Roland SPD or apps like Koala Samp
 
 **MIDI**
 - USB + Bluetooth MIDI input (single code path — Android's MIDI API treats both the same once paired at the OS level)
-- MIDI Learn: map any physical pad/knob to Volume, Pitch, EQ Low/Mid/High, Patch Next/Prev, Edit, Save
+- MIDI Learn: map any physical pad/knob to Volume, Pitch, EQ Low/Mid/High, Patch Next/Prev, Edit (opens the crop editor), Save, Delay Toggle (flips the selected pad's own delay on/off), Bank A / Bank B / Bank A+B (jump `bankMode` directly — a footswitch-style bank switch)
 - **Pad mapping is dual: note-based and CC-based, both live** — despite an earlier changelog entry below claiming note-based mapping was removed, a 2026-08-14 audit confirmed `MidiLearnRepository` (note→pad), native `MidiProcessor`'s `padToNote` map, and the whole `enableMidiLearn`/`assignMidiNote`/`onPadHit` JNI chain are all present, wired, and reachable from `MidiLearnScreen.kt`'s "PAD NOTES" section. `CcMapRepository`'s `PAD_1`–`PAD_8` CC targets are a separate, independent pad-triggering path through the same MIDI Learn flow as everything else. Either a learned note or a learned CC fires a pad. There are no built-in default CC mappings for pads, so a CC mapping must be MIDI-Learned once before a controller's pads will trigger anything over CC (note-based triggering has no such requirement once a note is learned).
 - **MIDI Channel Select** (1–16 or ALL) — filters incoming MIDI to one channel when your controller shares a MIDI bus
 - Hardware-keyboard fallback: `Q W E R` → pads 1–4, `A S D F` → pads 5–8 (suspended automatically while a text field has focus, e.g. the rename dialog)
@@ -75,7 +76,7 @@ An 8-pad drum sampler, similar in spirit to a Roland SPD or apps like Koala Samp
 
 ### 1.4 Architecture
 
-No ViewModel, no Hilt, no Navigation component. `OctapadScreen.kt` (~1900 lines) holds essentially all UI state as `remember { mutableStateOf }` / `SnapshotStateList`, and a handful of singleton objects hold state that needs to outlive recomposition:
+No ViewModel, no Hilt, no Navigation component. `OctapadScreen.kt` (~2500+ lines) holds essentially all UI state as `remember { mutableStateOf }` / `SnapshotStateList`; the right-side control panel is split across `RightPanel.kt` (main column + panel-open/close orchestration via a shared `closeAllPanels()`), `EQPanel.kt` (FX: EQ/Reverse/Pan/Gain/Velocity/Recording), `DelayPanel.kt` (MASTER switch + per-pad delay), `ChokePanel.kt` (None/1-4 levels, per-level folders), and `TempoPanel.kt` (LOOP: BPM/SPEED/PLAY MODE). A handful of singleton objects hold state that needs to outlive recomposition:
 
 | Singleton | Role |
 |---|---|
@@ -85,7 +86,7 @@ No ViewModel, no Hilt, no Navigation component. `OctapadScreen.kt` (~1900 lines)
 | `DrumEngine` | Owns the native Oboe engine lifecycle, dedupes redundant PCM reloads |
 | `PadDurationCache` | Caches the real decoded duration of factory samples (see §1.6) |
 | `MidiEventBus` | Lambda-based event bus connecting native MIDI callbacks to Compose state |
-| `CcMapRepository` | MIDI CC → named-target mappings (Volume, Pitch, EQ, Patch nav, Edit, Save, Pad 1–8) |
+| `CcMapRepository` | MIDI CC → named-target mappings (Volume, Pitch, EQ, Patch nav, Edit, Save, Delay Toggle, Bank A/B/A+B, Pad 1–8) |
 | `MidiLearnRepository` | MIDI note → pad mappings |
 | `MidiChannelState` | Which MIDI channel is currently being listened on |
 | `NativeBridge` | JNI bridge object |
@@ -96,13 +97,17 @@ No ViewModel, no Hilt, no Navigation component. `OctapadScreen.kt` (~1900 lines)
 finger DOWN on Pad N
   → DrumPad.pointerInput (single unified gesture handler — see §1.6) → onPress()
   → OctapadScreen.onPadHit(index)   [runs SYNCHRONOUSLY, no coroutine dispatch — see §1.6]
-    → resolves which native slot(s) to trigger based on active bank(s) (A/B/C)
-    → DrumEngine.trigger(slot, volume, pitch, stopExisting, lengthFraction)
+    → resolves which native slot(s) to trigger based on active bank(s) (A/B)
+    → syncDelayForHit() pushes this pad's delay config to native synchronously (once, only for
+      a genuinely new hit — never inside the loop-retrigger path, see §4's 2026-08-18 entry)
+    → DrumEngine.trigger(slot, volume, pitch, stopExisting, lengthFraction, pan, gain)
       → NativeBridge.triggerPad(...)  [JNI]
         → AudioEngine::triggerPad()  [C++, on the calling thread]
-          → claims a free Voice slot, writes padIndex/position/volume/pitch/lengthFraction,
-            THEN publishes it "ready" (see §1.6 for why this order matters)
-    → Oboe's realtime callback (AudioEngine::onAudioReady) mixes every ready voice every buffer
+          → claims a free Voice slot (or steals the oldest one if the 64-voice pool is full),
+            writes padIndex/position/volume/pitch/lengthFraction/pan/gain, resets attackGain to
+            0.0 (fresh fade-in), THEN publishes it "ready" (see §1.6 for why this order matters)
+    → Oboe's realtime callback (AudioEngine::onAudioReady) mixes every ready voice every buffer,
+      ramping each voice's attackGain/releaseGain in/out over ~3ms/~5ms for click-free onsets
 ```
 
 **MIDI path (Note-On or CC, depending on your hardware):**
@@ -120,7 +125,7 @@ Physical controller sends Control Change instead (some pad controllers do this)
 
 ### 1.5 Native audio engine (`app/src/main/cpp/`)
 
-- `AudioEngine.h/.cpp` — Oboe stream (Exclusive/MMAP performance mode when the device supports it, device-native sample rate — not a hardcoded value, see §1.6 — stereo float), 24 pad buffer slots, 64-voice polyphony pool, linear-interpolation pitch shifting, per-pad delay taps, a simple 3-band IIR EQ + master level applied on the final mix, soft clipping.
+- `AudioEngine.h/.cpp` — Oboe stream (Exclusive/MMAP performance mode when the device supports it, device-native sample rate — not a hardcoded value, see §1.6 — stereo float), 24 pad buffer slots (16-23 unused since Bank C's removal), 64-voice polyphony pool with a ~3ms attack fade-in and ~5ms release fade-out per voice (click/pop avoidance on both the start and end of every note, including retriggers and the pool-exhausted voice-steal path), linear-interpolation pitch shifting, per-pad delay taps (a single global effect, not per-voice — see the delay-clobber note in §4's 2026-08-18 entry if you touch delay sync timing), a simple 3-band IIR EQ + master level applied on the final mix, polyphony-aware headroom scaling + `tanhf()` soft clipping.
 - `MidiProcessor.h/.cpp` — GM-style default note→pad map, MIDI Learn mode, CC routing.
 - `native-lib.cpp` — the only JNI entry point (an old duplicate `myapplication.cpp` that used to conflict with it has been removed).
 
@@ -166,7 +171,10 @@ Physical controller sends Control Change instead (some pad controllers do this)
 - **Hindi font for kit names** — needs an actual `.ttf` (e.g. Noto Sans Devanagari) dropped into `res/font/`; not included yet.
 - **In-app MIDI purchase flow** — the paywall gate exists (`MidiPaywallScreen`, checks `midiPurchased`), but there's no in-app payment collection. Per the original spec, MIDI is sold separately and unlocked by flipping `midiPurchased` in the admin dashboard after payment is collected outside the app (UPI, etc.) — the screen says this plainly instead of pretending a purchase button exists. Real Google Play Billing integration would be a separate piece of work needing your Play Console account.
 - **API 24–25 devices** (Android 7.0–7.1) fall back to the native engine's higher-latency OpenSL ES backend automatically, since AAudio didn't exist yet — this is a real hardware/OS capability difference, not something app code can change.
-- The Android side has **not been compiled** in the environment this was built in (no Android SDK/NDK available) — every fix listed above is verified by careful manual tracing and full brace/paren-balance checks across the codebase, not an actual compiler run. Build it in Android Studio (or anywhere with the SDK/NDK set up) before shipping, and see §1.9 for what to specifically stress-test.
+- **Latency is device-dependent below this app's control** — the app already does everything on its side (synchronous trigger, no coroutine dispatch delay, Exclusive/MMAP mode, 1-burst buffer, no forced sample rate). Whatever latency floor remains on a given phone is that device's own audio-stack ceiling; see the logcat line in §1.9 to tell whether a specific device even granted Exclusive/MMAP mode.
+- **No release-build stripping**: `optimization { enable = false }` in `app/build.gradle.kts` — R8/ProGuard is disabled, so a release APK isn't shrunk/obfuscated and debug logging isn't stripped either. Intentional for now; revisit before a wide public release if APK size or reverse-engineering resistance start to matter.
+- **Choke levels 5/6 from pre-redesign kit backups are orphaned, not migrated.** The 2026-08-18 choke redesign trimmed levels to None/1-4 in the UI; a kit backup created *before* that change, with a pad assigned to level 5 or 6, still imports fine (storage format didn't change) but that assignment becomes permanently invisible and un-editable — harmless for actual choke behavior (the ACTIVE LEVEL selector can never reach 5/6 anymore, so it can never fire), but the value just sits in the pad's `chokeGroups` list forever with no UI path to see or clear it.
+- The Android side **has been compiled and built successfully** as of 2026-08-18 — both `:app:compileDebugKotlin`/`:app:assembleDebug` (repeatedly, throughout the third pass) and a fully signed `:app:assembleRelease` (against the real release keystore) — superseding the earlier "not compiled, verified by manual tracing only" caveat from the first two passes. Still worth an actual on-device run before shipping (a compiler pass doesn't catch runtime-only issues like the choke data-loss bug the 2026-08-18 audit found), and see §1.9 for what to specifically stress-test.
 
 ### 1.8 Licensing / Activation (client-side)
 
@@ -175,7 +183,7 @@ Full loop, connected to the admin panel described in §2.
 - **`license/DeviceId.kt`** — stable per-device ID: `Settings.Secure.ANDROID_ID`, with a persisted random UUID fallback for the rare device where that's unavailable. Used to lock one activation code to exactly one phone.
 - **`license/LicenseApi.kt`** — plain `HttpURLConnection` client (no networking library dependency) calling the admin panel's `/api/app/signup`, `/api/app/redeem`, `/api/app/status`.
 - **`license/LicenseRepository.kt`** — local cache with a **3-day offline grace period**: the app opens instantly without internet once activated, but a remote deactivation still catches up within 3 days of it actually happening (or within ~30 minutes if the app is open and online — see the periodic check below).
-- **`ui/ActivationScreen.kt`** — the real first-run blocking screen: admin-panel server URL (collapsible, set once), name/phone (sent to `/api/app/signup`), activation code (sent to `/api/app/redeem`), with distinct error states for invalid code / already-used-on-another-device / deactivated / can't-reach-server.
+- **`ui/ActivationScreen.kt`** — the real first-run blocking screen: name/phone (sent to `/api/app/signup`), activation code (sent to `/api/app/redeem`), with distinct error states for invalid code / already-used-on-another-device / deactivated / can't-reach-server. The admin-panel server URL is **not** user-editable in-app (an earlier version had a collapsible "SERVER URL" field; removed deliberately so no user can point activation at an arbitrary server) — it's a hardcoded fallback in `ActivationScreen.kt` (`serverUrl` initializer), used whenever `LicenseRepository.getServerUrl()` returns blank. Changing which admin panel the app talks to means editing that hardcoded string in code and shipping a new build, not a runtime setting.
 - **`ui/MidiPaywallScreen.kt`** — shown instead of MIDI Learn when the current license's `midiPurchased` flag is false.
 - **`MainActivity.kt`** — gates entry: Splash → (Activation screen if not yet activated) → the pad screen. Won't show the pads until activation succeeds once.
 - **`OctapadScreen.kt`** — re-checks `/api/app/status` every 30 minutes while the app is open, so a remote deactivation or a MIDI purchase grant from the dashboard takes effect live, not just on next app restart.
@@ -186,13 +194,18 @@ Full loop, connected to the admin panel described in §2.
 
 ### 1.9 What to specifically test once you can build this
 
-- Rapid multi-pad hitting, and hitting the same pad repeatedly fast — the exact repro for the native race condition fix in §1.6
-- The 2-finger swap/drag/mix gesture, repeatedly — the exact repro for the gesture-conflict fix
-- LOOP mode on a factory (not custom-imported) pad at a slow BPM
+- Rapid multi-pad hitting, and hitting the same pad repeatedly fast — the exact repro for the native race condition fix in §1.6, and for the multi-hit crackle/attack-fade fix in the 2026-08-18 pass
+- The 2-finger swap/drag/mix gesture, repeatedly — hold for the full ~3.5s to confirm the menu opens, and release early to confirm it *doesn't*
+- LOOP mode on a factory (not custom-imported) pad at a slow BPM, with the SPEED knob moved off 1.0x — should audibly speed up/slow down the retrigger rate now
 - Mix / Add-To-End / waveform crop on factory kit sounds specifically
+- Crop editor: drag a region, tap PREVIEW (should hear the selection without anything being saved yet), then either APPLY (commits) or navigate away without applying (original sample must be untouched)
+- Delay: hit a pad with its own DELAY on while a *different* pad is actively looping with delay off — the looping pad's retriggers shouldn't clobber the first pad's delay tap (the exact repro for the 2026-08-18 audit's delay-clobber regression)
+- Choke: assign a pad to Level 2 in the new folder UI, then Level 3 — confirm it leaves Level 2 (single-membership); if testing against a kit backed up before the 2026-08-18 choke redesign, check for orphaned level 5/6 assignments per the known-limitations note above
+- MIDI knob sweep (VOLUME/PITCH/EQ) held for an extended period — the exact repro for the "knob gets stuck" fix (debounced persistence + gesture-cancellation fix)
 - Importing a deliberately corrupted/truncated audio file — should fail gracefully, not degrade later imports
 - Recording while another app holds the microphone — should show an error toast, not crash
-- The full activation flow against a real deployed (or LAN) admin panel URL
+- The full activation flow against a real deployed (or LAN) admin panel URL — note `ActivationScreen.kt` no longer has an in-app "SERVER URL" field, so this must be baked into the hardcoded fallback in code before testing
+- A phone with a display notch/camera-cutout, in landscape — confirm the pad grid/control panel isn't clipped or drawn under the cutout
 - Logcat for the `AudioEngine started: sampleRate=... sharingMode=0(Exclusive)/1(Shared)...` line, to see whether your test device actually grants Exclusive/MMAP mode — if it says Shared, that device's latency ceiling is a hardware/OS limit, not fixable from app code
 
 ---
@@ -295,7 +308,38 @@ npm run build       # production build check
 
 ## 4. Changelog
 
-**Second full system-wide audit (latest pass, 2026-08-14)**
+**Third pass — Bank C removal, Delay/Choke redesign, real-time audio + MIDI fixes, post-implementation audit (2026-08-18)**
+
+A large user-driven pass (bug reports + feature requests) followed immediately by an independent full-codebase audit (6 parallel finder agents) that caught real regressions in the same session's own changes before they'd been separately verified. Grouped by area:
+
+*Bank / Choke / Delay redesign:*
+- **Bank C removed entirely** — UI, `bankKitIdx()`, `nativeSlotsFor()`, choke/fire logic. It was pushing `RightPanel.kt`'s patch-list nav row off the bottom of the (non-scrolling) panel whenever active. Native `AudioEngine` still reserves 24 pad slots; 16-23 are just unused now (not worth a native slot-layout rewrite for a UI-level removal). `PreferencesRepository`'s `loadKitC()/saveKitC()` and the backup `kitC` field are kept, unread, so old exported backups still parse.
+- **Choke redesigned**: 6 levels → None/1/2/3/4; a pad now belongs to at most one level (dropdown-style) instead of a multi-select set; the level-assignment UI is now 4 collapsible per-level folders instead of one long list. **Audit caught a real data-loss bug in the first implementation**: the "deselect" path called `groups.clear()` instead of `groups.remove(level)` — for a kit saved *before* this redesign (which could have a pad in multiple legacy levels, including 5/6 which have no UI anymore), toggling off the one level shown in the new UI silently wiped every other legacy level too. Fixed to `remove()` before shipping.
+- **Delay moved out of FX into its own `DelayPanel.kt`**, with a new global MASTER kill switch (`delayMasterEnabled`) layered on top of the existing per-pad-per-kit `padDelayEnabled` flag — MASTER off mutes delay everywhere without touching any pad's own setting. Also fixed the actual reported bug ("first hit has no delay, works after the 2nd hit on the same pad") — delay's native params were only synced by a reactive `LaunchedEffect` that lagged a frame behind the synchronous trigger. **Audit caught a regression the first fix introduced**: moving that sync inside `fire()` (called both for the initial hit and every loop auto-retrigger) meant an already-looping pad's retrigger would re-clobber the single global native delay state with its own settings, stomping whatever a different pad's hit had just set. Fixed by syncing once before the initial `fire()` call only, never inside `fire()` itself.
+
+*Real-time audio engine (`AudioEngine.cpp`/`.h`):*
+- **Multi-hit crackle ("kich khich") on fast multi-pad playing** — every freshly-claimed voice started at full amplitude on frame 0 (rarely a zero-crossing sample), a real click/pop source. Added a ~3ms attack fade-in (`attackGain`, mirrors the existing `releaseGain` fade-out), set at every voice-claim site (`triggerPad`'s normal + pool-exhausted-steal paths, `fireDelayTaps`'s echo claim). Audit verified both `triggerPad` claim paths correctly get it (single shared `if (claimed)` block) — not a regression. Also hoisted the attack/release ramp step-size computation out of the per-voice loop (both only depend on `outputSampleRate_`, fixed for the whole callback) — a small real-time-thread efficiency fix caught by the audit.
+
+*MIDI / knob responsiveness:*
+- **"Volume/pitch knob gets stuck after testing for a while, via MIDI and on-screen both"** — two independent root causes, both fixed. (1) `LinearSlider`'s (VOL/PITCH/EQ/DLY TIME/DLY LEVEL/PAN/GAIN — every continuous knob) touch-gesture handler was a bare `awaitPointerEventScope { while(true) {...} }` never wrapped in `awaitEachGesture`; since every slider lives inside a `verticalScroll` panel, losing gesture arbitration to that ancestor scrollable (ordinary on a diagonal drag) threw an uncaught cancellation out of the handler's coroutine, permanently killing that slider until the screen reopened. (2) `persistKits()` (synchronous JSON-serializes up to 200 kits) was called on *every single* CC tick / drag-frame from every continuous knob — a fast MIDI sweep can send dozens of CC messages/sec, and stacking that serialize+disk-write on the MIDI receive thread on every one of them made the thread fall behind the longer a sweep continued. Added `persistKitsDebounced()` (300ms debounce) at every continuous-drag call site; one-shot actions (rename, swap, delete, SAVE, toggles) still persist immediately.
+- Removed `Log.d` calls that ran on every single MIDI message (Note On/Off/CC in `MidiReceiver.kt`) and every pad hit (`onPadHit`'s `"PADHIT"` log) — real per-message syscall cost, no shipped-build benefit (ProGuard/R8 disabled, nothing strips debug logging).
+- Added MIDI-Learn CC targets: `DELAY_TOGGLE`, `BANK_A`, `BANK_B`, `BANK_AB`.
+
+*Crop editor (`WaveformEditorScreen.kt`):*
+- **Accidental-touch data loss**: the editor used to autosave (re-encode + overwrite the original sample) the instant any drag gesture on the waveform canvas ended, with zero confirmation — a single stray touch permanently destroyed the original. Dragging now only updates the in-memory selection; nothing is written until an explicit APPLY button is tapped. Added a PREVIEW button that plays the current unsaved selection straight from in-memory PCM via `AudioTrack` (no file write) so it can be heard before committing.
+
+*Loop / tempo:*
+- **PLAY MODE = LOOP ignored the SPEED knob entirely** (always retriggered at the sample's raw length) — the most common case someone would test SPEED against. Added a separate `loopModeIntervalMs = durationToShow / speed` used only for true LOOP mode; the global Loop toggle's BPM-gated `beatIntervalMs` is deliberately still not applied to LOOP mode (would reintroduce an earlier "silence gap" bug). Also fixed a BPM precision-loss bug: `beatIntervalMs` divided `60_000L / bpm` as `Long` before the SPEED division ever ran, truncating early and compounding rounding error.
+
+*UI polish:*
+- Kit-rename dialog's SAVE button was reachable only below the on-screen keyboard (which could cover it) — added a second SAVE action in the dialog's title row, always visible regardless of keyboard height.
+- Swap/Mix/Add-to-Last (2-finger pad gesture) used to open instantly on any 2-finger drag/tap that crossed onto a different pad — now gated on a ~3.5s hold; releasing early cancels the pending action and the menu never appears.
+- Display-cutout (notch) handling was entirely absent for this fullscreen-immersive landscape app, left to inconsistent per-OEM defaults ("full screen on some phones, half on others"). Added `windowLayoutInDisplayCutoutMode="shortEdges"` (API 27+ overlay) plus `windowInsetsPadding(WindowInsets.displayCutout)` on the root layout so `controlPanelWidth`/pad-grid sizing is computed from the real safe area on every device.
+- **`RightPanel.kt`'s side-panel-closing logic deduplicated**: the same 5-line "close every other panel" block was repeated across 6+ call sites; every new panel (DELAY was the latest) meant hunting down and editing all of them. Extracted `closeAllPanels()`. **Audit caught a live instance of exactly this failure mode**: the DELAY icon's long-press handler opened the panel correctly but never set `activeBtn = "DELAY"` (every other panel-opening path did) — the CROP/CHOKE/DELAY button row kept highlighting whichever button was tapped last instead of DELAY.
+
+**Flagged, not changed** (audit found but needs a product decision, not a bug fix): `ActivationScreen.kt`'s advanced "SERVER URL" field was removed at some point outside this session, leaving no in-app way to point at a different admin-panel server if the hardcoded fallback URL is ever wrong for a given deployment — worth confirming this was intentional.
+
+**Second full system-wide audit (previous pass, 2026-08-14)**
 
 A follow-up, independent audit (four parallel passes: native audio engine/JNI, Kotlin UI state/pad-hit hot path, persistence/backup/MIDI repos, admin panel API/license flow) specifically re-checking whether the previous pass's fixes were actually complete. Real bugs found and fixed:
 

@@ -746,28 +746,30 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             }
         }
 
-        // Fires the actual native trigger + updates the LCD/choke bookkeeping
-        // for one hit. Used both for the immediate first hit (below) and for
-        // each subsequent loop re-trigger inside the coroutine.
-        fun fire(token: Long) {
-            latestHitToken     = token
-            playingPadUri      = uriToShow
-            playbackDurationMs = durationToShow
-            playbackPositionMs = 0L
-
-            // BUG FIX: delay's native params used to be synced only by a
-            // reactive LaunchedEffect keyed on `selectedPad` — a coroutine
-            // that doesn't actually run until the next recomposition frame,
-            // roughly a frame AFTER `selectedPad = index` gets set on tap.
-            // The trigger below fires synchronously, same call stack, before
-            // that frame — so the very first hit on a freshly-selected pad
-            // read whatever delay config was still live from the PREVIOUS
-            // pad, and only the second+ hit on the same pad (by which point
-            // the LaunchedEffect had caught up) got the correct one. That's
-            // exactly "first hit no delay, works after multiple hits on the
-            // same pad, breaks again on switching pads". Syncing synchronously
-            // here, for the pad actually being hit (`index`), not whichever
-            // pad happens to be selected in the UI, closes that gap.
+        // Pushes this pad's delay config to native synchronously, right
+        // before its trigger fires. BUG FIX: delay's native params used to
+        // be synced only by a reactive LaunchedEffect keyed on `selectedPad`
+        // — a coroutine that doesn't actually run until the next
+        // recomposition frame, roughly a frame AFTER `selectedPad = index`
+        // gets set on tap. The trigger fires synchronously, same call stack,
+        // before that frame — so the very first hit on a freshly-selected
+        // pad read whatever delay config was still live from the PREVIOUS
+        // pad, and only the second+ hit on the same pad (by which point the
+        // LaunchedEffect had caught up) got the correct one. That's exactly
+        // "first hit no delay, works after multiple hits on the same pad,
+        // breaks again on switching pads".
+        //
+        // BUG FIX 2: this used to run inside fire() itself, which is also
+        // called from the loop-retrigger coroutine below — delay is a
+        // single GLOBAL native effect (not per-voice), so an already-looping
+        // pad's automatic retrigger re-pushing ITS OWN delay config on every
+        // beat would clobber whatever a *different* pad's hit had just set
+        // moments earlier, making that other pad's delay tap fire with the
+        // looping pad's timing/on-off state instead of its own. Only the
+        // initial hit (call site below, not fire() itself) needs this sync —
+        // a retrigger is the same pad repeating, so its delay config hasn't
+        // changed since the hit that started the loop.
+        fun syncDelayForHit() {
             val delayPadEnabled = if (bankKitIdx() in kits.indices)
                 kits[bankKitIdx()].padDelayEnabled.getOrElse(index) { false } else false
             NativeBridge.setDelayEnabled(delayPadEnabled && delayMasterEnabled)
@@ -776,6 +778,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 kits[bankKitIdx()].padDelayMs.getOrElse(index) { 300 } else 300
             NativeBridge.setDelayTapIntervalFrames(DrumEngine.sampleRate().toLong() * delayMsForPad.toLong() / 1000L)
             NativeBridge.setDelayChokePad(delayChokePad)
+        }
+
+        // Fires the actual native trigger + updates the LCD/choke bookkeeping
+        // for one hit. Used both for the immediate first hit (below) and for
+        // each subsequent loop re-trigger inside the coroutine.
+        fun fire(token: Long) {
+            latestHitToken     = token
+            playingPadUri      = uriToShow
+            playbackDurationMs = durationToShow
+            playbackPositionMs = 0L
 
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
@@ -802,6 +814,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
         pressedPads[index] = true
 
+        syncDelayForHit()
         var myToken = System.nanoTime()
         fire(myToken)   // ← the sound actually starts here, synchronously
         if (playMode == "LOOP") loopModeActive[index] = true
@@ -1324,13 +1337,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         persistKits()
     }
 
-    // NEW: toggles padIndex's membership in choke-level `level` (1..6) for
-    // the current kit, then persists the change.
+    // Sets padIndex's choke level (1..4) for the current kit — a pad now
+    // belongs to at most ONE level at a time (like picking from a
+    // None/1/2/3/4 dropdown), not a multi-select set. Tapping the level a
+    // pad is already assigned to clears it back to None; tapping a
+    // different level replaces whatever it was on before. Storage is still
+    // `chokeGroups: List<SnapshotStateList<Int>>` (a list per pad) for
+    // backward compatibility with existing saved kits/backups — this just
+    // never lets that list hold more than one entry going forward.
+    //
+    // BUG FIX: the "already contains this level" branch used to call
+    // groups.clear() — fine for a pad that only ever had one level, but a
+    // kit saved before this None/1-4 single-select redesign could still
+    // have a pad in MULTIPLE legacy levels (the old grid allowed it,
+    // including levels 5/6 which no longer have any UI). clear() silently
+    // wiped every other legacy level too the first time that pad's UI-
+    // visible level was toggled off — real, silent data loss. remove() only
+    // takes off the one level actually tapped.
     fun toggleChokeGroup(padIndex: Int, level: Int) {
         val groups = kits[bankKitIdx()].chokeGroups[padIndex]
         if (groups.contains(level)) {
             groups.remove(level)
         } else {
+            groups.clear()
             groups.add(level)
         }
         persistKits()

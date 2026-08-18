@@ -445,6 +445,15 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // below reflects real simultaneous polyphony, not just claimed slots.
     int32_t activeVoiceCount = 0;
 
+    // Retrigger fade-out (~5ms) / fresh-voice fade-in (~3ms) step sizes —
+    // both depend only on outputSampleRate_, which is fixed for this whole
+    // callback, so hoisted out of the per-voice loop below instead of
+    // recomputed (a float division each) once per active voice per buffer —
+    // harmless alone but adds up on the real-time audio thread as polyphony
+    // grows toward the 64-voice pool limit.
+    const float releaseStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.005f);
+    const float attackStep  = 1.0f / (static_cast<float>(outputSampleRate_) * 0.003f);
+
     {
         std::lock_guard<std::mutex> lock(bufferMutex_); // brief; loads are rare
 
@@ -485,16 +494,14 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 
             // Retrigger fade-out: ~5ms linear ramp to silence instead of an
             // instant cut, so a fast retrigger never produces a click/pop.
-            bool isReleasing = v.releasing.load(std::memory_order_relaxed);
-            const float releaseStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.005f);
-            // Fade-IN: ~3ms linear ramp from silence instead of starting at
-            // full amplitude on frame 0 (rarely a zero-crossing sample) —
-            // same click-avoidance idea as releaseStep above, applied to the
-            // start of a voice instead of the end. attackGain is only ever
-            // < 1.0 for the first ~3ms after a fresh claim (see triggerPad/
+            // Fade-IN (attackStep): ~3ms linear ramp from silence instead of
+            // starting at full amplitude on frame 0 (rarely a zero-crossing
+            // sample) — same click-avoidance idea, applied to the start of a
+            // voice instead of the end. attackGain is only ever < 1.0 for
+            // the first ~3ms after a fresh claim (see triggerPad/
             // fireDelayTaps), so this is a no-op for every already-playing
-            // voice.
-            const float attackStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.003f);
+            // voice. Both step sizes computed once above, outside this loop.
+            bool isReleasing = v.releasing.load(std::memory_order_relaxed);
 
             for (int32_t i = 0; i < numFrames; i++) {
                 int64_t idx = static_cast<int64_t>(v.position);

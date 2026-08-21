@@ -46,6 +46,13 @@ public:
     std::function<void(int, float)> onPadHit;           // (padIndex 0-7, velocity 0..1)
     std::function<void(int)>        onProgramChange;    // (kit index, 0-based)
     std::function<void(int, int)>   onLearnAssigned;     // (padNumber, note) — MIDI Learn UI feedback
+    // Fires for EVERY Note-On that isn't consumed by pad-note MIDI Learn
+    // (see noteOn) — (note, velocity), regardless of whether that note maps
+    // to a pad. Lets Kotlin-side "learn a Note for this button/action"
+    // targets (EDIT/SAVE/PATCH_NEXT/PATCH_PREV/DELAY_TOGGLE/BANK_A/BANK_B/
+    // BANK_AB — see NoteMapRepository) listen for a note independent of
+    // pad dispatch, the same way onControlChange already does for CC.
+    std::function<void(int, int)>   onRawNoteOn;
 
 private:
     std::unordered_map<int, int> padToNote; // pad (0-7) -> note

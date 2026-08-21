@@ -84,4 +84,13 @@ object NativeBridge {
     fun onProgramChangeFromNative(program: Int) {
         MidiEventBus.triggerProgramChange(program)
     }
+
+    // Fires for EVERY Note-On not consumed by pad-note MIDI Learn, whether
+    // or not that note is mapped to a pad — lets NoteMapRepository's
+    // button/action targets (EDIT/SAVE/PATCH_NEXT/...) learn/dispatch off a
+    // Note the same way CC targets already do off a Control Change.
+    @JvmStatic
+    fun onRawNoteOnFromNative(note: Int, velocity: Int) {
+        MidiEventBus.triggerRawNoteOn(note, velocity)
+    }
 }

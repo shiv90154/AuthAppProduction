@@ -33,11 +33,6 @@ fun TempoPanel(
     loopEnabled: Boolean,
     onBpmChange: (Int) -> Unit,
     onLoopChange: (Boolean) -> Unit,
-    // CHOKE quick-toggle — same Exclusive Mode state the dedicated CHOKE
-    // panel (next to CROP) uses; detailed level/pad-group assignment still
-    // lives there, this is just live-performance quick access.
-    exclusiveMode: Boolean = false,
-    onExclusiveChange: (Boolean) -> Unit = {},
     // NEW: global tempo-synced playback-rate multiplier
     speed: Float = 1f,
     onSpeedChange: (Float) -> Unit = {},
@@ -73,7 +68,7 @@ fun TempoPanel(
                     fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                 Box(
                     modifier = Modifier
-                        .size(22.dp)
+                        .size(28.dp)
                         .clip(RoundedCornerShape(50))
                         .background(Color(0xFF2A2A2A))
                         .clickable(remember { MutableInteractionSource() }, null) { onClose() },
@@ -110,6 +105,9 @@ fun TempoPanel(
             Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
 
             // ── Speed (tempo-synced playback-rate multiplier) ──────────────
+            // Continuous drag knob, same LinearSlider used for VOL/PITCH —
+            // replaces the old -10%/RESET/+10% step buttons, which weren't
+            // direct enough for a live-performance speed adjustment.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -119,14 +117,17 @@ fun TempoPanel(
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("${"%.2f".format(speed)}x", color = TempoTextWht, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    Text("SPEED", color = TempoTextMuted, fontSize = 9.sp, letterSpacing = 1.5.sp)
+                    LinearSlider(
+                        title = "SPEED",
+                        value = speed,
+                        min = 0.5f,
+                        max = 2f,
+                        displayText = "${"%.2f".format(speed)}x",
+                        accentColor = TempoAccent,
+                        onValueChange = { onSpeedChange(it.coerceIn(0.5f, 2f)) }
+                    )
                     Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        BpmStepButton("-10%") { onSpeedChange((speed - 0.1f).coerceIn(0.5f, 2f)) }
-                        BpmStepButton("RESET") { onSpeedChange(1f) }
-                        BpmStepButton("+10%") { onSpeedChange((speed + 0.1f).coerceIn(0.5f, 2f)) }
-                    }
+                    BpmStepButton("RESET") { onSpeedChange(1f) }
                     Spacer(Modifier.height(6.dp))
                     Text(
                         "Scales BPM-synced Loop retriggers and per-pad LOOP mode",
@@ -146,17 +147,6 @@ fun TempoPanel(
                 enabled  = loopEnabled,
                 color    = TempoGreen,
                 onClick  = { onLoopChange(!loopEnabled) }
-            )
-
-            Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
-
-            // ── Choke quick-toggle ──────────────────────────────────────────
-            ToggleRow(
-                label    = "CHOKE",
-                subtitle = if (exclusiveMode) "Choke groups active" else "Choke is off",
-                enabled  = exclusiveMode,
-                color    = TempoGreen,
-                onClick  = { onExclusiveChange(!exclusiveMode) }
             )
 
             Text(

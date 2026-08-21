@@ -50,6 +50,7 @@ fun RightPanel(
     onKitPrev: () -> Unit,
     onKitNext: () -> Unit,
     onOpenKitList: () -> Unit,
+    onOpenKitListB: () -> Unit = {},
     onOpenImport: () -> Unit,
     onOpenAudios: () -> Unit,
     onOpenExport: () -> Unit,
@@ -61,16 +62,11 @@ fun RightPanel(
     waveformVersion: Int = 0,
     // ── NEW: EQ panel state ───────────────────────────────────────────────────
     loopEnabled: Boolean = false,
-    exclusiveMode: Boolean = false,
     velocityOn: Boolean = true,
     onLoopChange: (Boolean) -> Unit = {},
-    onExclusiveChange: (Boolean) -> Unit = {},
     onVelocityChange: (Boolean) -> Unit = {},
     allPadChokeGroups: List<List<Int>> = List(8) { emptyList() },
     onToggleChokeGroup: (Int, Int) -> Unit = { _, _ -> },
-    // NEW: single active choke level (0 = none)
-    activeChokeLevel: Int = 0,
-    onSelectActiveChokeLevel: (Int) -> Unit = {},
     isRecording: Boolean,
     onRecordClick: () -> Unit,
     onOpenEdit: () -> Unit = {},
@@ -229,12 +225,8 @@ fun RightPanel(
             ChokePanel(
                 width = eqPanelWidth,
                 visible = showChokePanel,
-                exclusiveMode = exclusiveMode,
-                onExclusiveChange = onExclusiveChange,
                 allPadChokeGroups = allPadChokeGroups,
                 onToggleChokeGroup = onToggleChokeGroup,
-                activeChokeLevel = activeChokeLevel,
-                onSelectActiveChokeLevel = onSelectActiveChokeLevel,
                 onClose = { showChokePanel = false }
             )
         }
@@ -274,8 +266,6 @@ fun RightPanel(
                 loopEnabled = loopEnabled,           // MOVED from EQPanel
                 onBpmChange = onBpmChange,
                 onLoopChange = onLoopChange,         // MOVED from EQPanel
-                exclusiveMode = exclusiveMode,       // NEW: CHOKE quick-toggle
-                onExclusiveChange = onExclusiveChange,
                 speed = speed,
                 onSpeedChange = onSpeedChange,
                 padPlayMode = padPlayMode,           // MOVED from EQ/FX panel
@@ -329,14 +319,40 @@ fun RightPanel(
         // must read as a fixed hardware LCD/control strip, not a scrollable
         // list. If content ever gets clipped on very short screens again,
         // fix that by trimming spacing/sizes, not by re-adding scroll here.
+        //
+        // RESPONSIVE FIX: the trim used to be one fixed set of dp constants
+        // tuned for a single reference device — on a shorter-height phone
+        // (small screen, or any device with less vertical room in this
+        // landscape-only app) the same fixed spacing/slider-track heights
+        // could still add up to more than the column's actual maxHeight and
+        // clip the bottom rows. BoxWithConstraints + vSpace()/sliderTrackH
+        // below scale that same spacing/size budget down proportionally
+        // instead, so the trim now adapts per-device rather than only being
+        // correct for whatever device it was last tuned against.
+        BoxWithConstraints(modifier = Modifier.fillMaxHeight()) {
+        // BUG FIX: the 380dp reference budget below was tuned assuming
+        // Bank A alone — it didn't account for the Bank B kit-selector row
+        // (the "< B: kitname >" row, ~40dp incl. its spacer) that only
+        // renders when Bank B is actually active. On a shorter-height phone
+        // that extra row pushed the "◄ PATCH LIST ►" nav row at the very
+        // bottom past the column's bottom edge, where — since this panel
+        // deliberately has no scroll fallback (see the note above) — it got
+        // clipped/hidden instead of shrinking to fit like everything else.
+        // Folding the same extra height into the reference budget here
+        // makes heightScale shrink a little further whenever Bank B is on,
+        // so the nav row stays on-screen instead of being silently dropped.
+        val bankBExtra = if ('B' in bankMode) 40.dp else 0.dp
+        val heightScale = (maxHeight / (380.dp + bankBExtra)).coerceIn(0.72f, 1f)
+        fun vSpace(base: Dp): Dp = base * heightScale
+        val sliderTrackH = 68.dp * heightScale
         Column(
             modifier = Modifier
                 .width(controlPanelWidth)
                 .fillMaxHeight()
                 .clip(RoundedCornerShape(12.dp))
                 .background(PanelBg)
-                .padding(6.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp)
+                .padding(vSpace(6.dp)),
+            verticalArrangement = Arrangement.spacedBy(vSpace(3.dp))
         ) {
 
             // ── PATCH LIST / EDITxx PADS / REC ──────────────────────────────────
@@ -360,20 +376,13 @@ fun RightPanel(
                     closeAllPanels()
                     when (label) {
                         "CROP" -> onOpenEdit()   // open WaveformEditorScreen
-                        "CHOKE" -> {
-                            showChokePanel = true
-                            // Choke groups do nothing without Exclusive Mode on, and it
-                            // used to require a separate manual tap inside the panel —
-                            // turn it on the moment CHOKE is opened so the level/group
-                            // picker (gated on exclusiveMode below) is usable immediately.
-                            onExclusiveChange(true)
-                        }
+                        "CHOKE" -> showChokePanel = true
                         "DELAY" -> showDelayPanel = true
                     }
                 }
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(vSpace(4.dp)))
 
             // NEW: SAVE + LOAD quick-access on the main display, so both are
             // reachable without a detour through FX/SETTINGS.
@@ -425,7 +434,7 @@ fun RightPanel(
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(vSpace(4.dp)))
 
             CtrlBtnRow(
                 labels = listOf("FX", "LOOP", "SETTINGS"),
@@ -467,7 +476,7 @@ fun RightPanel(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .background(Color(0xFF1A1A1A))
-                    .padding(4.dp)
+                    .padding(vSpace(4.dp))
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
@@ -503,7 +512,7 @@ fun RightPanel(
                             textAlign = TextAlign.Center
                         )
                     }
-                    Spacer(Modifier.height(2.dp))
+                    Spacer(Modifier.height(vSpace(2.dp)))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -525,7 +534,7 @@ fun RightPanel(
                                 max = 2f,
                                 displayText = "${(padVolume * 100).toInt()}%",
                                 accentColor = Color(0xFF00E5FF),
-                                trackHeight = 68.dp
+                                trackHeight = sliderTrackH
                             )
                         }
 
@@ -571,7 +580,7 @@ fun RightPanel(
                                 )
                             }
 
-                            Spacer(Modifier.height(6.dp))
+                            Spacer(Modifier.height(vSpace(6.dp)))
 
                             // NEW: EDIT MODE — round button, right below DLY.
                             // While on, tapping any pad opens a contextual
@@ -581,7 +590,15 @@ fun RightPanel(
                                     .size(30.dp)
                                     .clip(RoundedCornerShape(50))
                                     .background(if (editModeOn) Color(0xFFFFB74D) else Color(0xFF3A3A3A))
-                                    .pointerInput(Unit) {
+                                    // BUG FIX: pointerInput(Unit) only launched the gesture
+                                    // detector once, so its lambda closed over editModeOn's
+                                    // value from the very first composition and kept toggling
+                                    // from that stale snapshot forever (button visually updated
+                                    // fine since Text/background read the live parameter, but
+                                    // tapping stopped actually flipping the state after the
+                                    // first tap). Keying on editModeOn restarts the detector
+                                    // with a fresh closure every time the value changes.
+                                    .pointerInput(editModeOn) {
                                         detectTapGestures { onEditModeChange(!editModeOn) }
                                     },
                                 contentAlignment = Alignment.Center
@@ -607,7 +624,7 @@ fun RightPanel(
                                 max = 2f,
                                 displayText = "${"%.2f".format(padPitch)}x",
                                 accentColor = Color(0xFFFFB74D),
-                                trackHeight = 68.dp
+                                trackHeight = sliderTrackH
                             )
                         }
                     }
@@ -647,7 +664,7 @@ fun RightPanel(
                 }
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(vSpace(4.dp)))
 
             Row(
                 Modifier.fillMaxWidth(),
@@ -677,7 +694,7 @@ fun RightPanel(
 
             // Bank B kit selector — only shown while Bank B is actually audible
             if ('B' in bankMode) {
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(vSpace(4.dp)))
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -685,13 +702,13 @@ fun RightPanel(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
+                            .size(32.dp)
                             .clip(RoundedCornerShape(50))
                             .background(NavRed)
                             .pointerInput(Unit) { detectTapGestures { onKitBPrev() } },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("<", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                        Text("<", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
                     }
                     Text(
                         "B: $kitBName",
@@ -706,22 +723,36 @@ fun RightPanel(
                         // button on the right could end up clipped off-screen
                         // entirely, un-tappable. weight(1f) keeps both nav
                         // buttons always visible regardless of name length.
-                        modifier = Modifier.weight(1f)
+                        //
+                        // NEW: Bank B used to only have these < / > step
+                        // buttons — no way to jump straight to a specific
+                        // kit number the way Bank A's PATCH LIST does.
+                        // Tapping the name itself now opens the same
+                        // patch-list screen, targeting Bank B's selection.
+                        modifier = Modifier
+                            .weight(1f)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    activeBtn = ""
+                                    closeAllPanels()
+                                    onOpenKitListB()
+                                }
+                            }
                     )
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
+                            .size(32.dp)
                             .clip(RoundedCornerShape(50))
                             .background(NavRed)
                             .pointerInput(Unit) { detectTapGestures { onKitBNext() } },
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(">", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                        Text(">", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(vSpace(6.dp)))
 
             // ── Navigation Row  < PATCH > ──────────────────────────────────────
             Row(
@@ -775,6 +806,7 @@ fun RightPanel(
                     Text(">", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
                 }
             }
+        }
         }
     }
 }

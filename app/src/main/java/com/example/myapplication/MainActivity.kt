@@ -166,6 +166,13 @@ class MainActivity : ComponentActivity() {
             event.repeatCount == 0 &&
             !KeyboardPlayState.textInputActive
         ) {
+            // Tab always exits EDIT MODE (a quick "get me out of here"
+            // shortcut for a hardware keyboard), regardless of whether it's
+            // currently on — OctapadScreen just forces the flag false.
+            if (event.keyCode == KeyEvent.KEYCODE_TAB) {
+                MidiEventBus.triggerExitEditMode()
+                return true
+            }
             val pad = when (event.keyCode) {
                 KeyEvent.KEYCODE_Q -> 1
                 KeyEvent.KEYCODE_W -> 2

@@ -39,9 +39,11 @@ private val EqTextWht   = Color(0xFFEEEEEE)
 fun EQPanel(
     visible: Boolean,
     selectedPad: Int = 0,          // NEW: display which pad these settings apply to
-    // NOTE: exclusiveMode + choke levels moved out to their own dedicated
-    // ChokePanel.kt (a top-level CHOKE button next to CROP) — used to live
-    // buried in here behind an EXCLUSIVE MODE toggle, three taps deep.
+    // NOTE: choke levels moved out to their own dedicated ChokePanel.kt (a
+    // top-level CHOKE button next to CROP) — used to live buried in here
+    // behind an EXCLUSIVE MODE toggle, three taps deep. That toggle (and
+    // the separate ACTIVE LEVEL selector) was later removed entirely —
+    // choke groups are simply always live now, see ChokePanel.kt.
     velocityOn: Boolean = true,
     onVelocityChange: (Boolean) -> Unit = {},
     isRecording: Boolean,
@@ -105,7 +107,7 @@ fun EQPanel(
                     )
                     Box(
                         modifier = Modifier
-                            .size(22.dp)
+                            .size(28.dp)
                             .clip(RoundedCornerShape(50))
                             .background(Color(0xFF2A2A2A))
                             .clickable(remember { MutableInteractionSource() }, null) { onClose() },

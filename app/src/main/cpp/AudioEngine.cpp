@@ -468,14 +468,26 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     auto *out = static_cast<float*>(audioData);
     std::fill(out, out + numFrames * 2, 0.0f);
 
-    // Fire any delay taps that fall in this buffer window
-    if (delayEnabled_.load(std::memory_order_relaxed)) {
-        fireDelayTaps(numFrames);
-    }
-
-    // Counts voices actually mixed into this buffer, so the headroom scale
-    // below reflects real simultaneous polyphony, not just claimed slots.
-    int32_t activeVoiceCount = 0;
+    // Fire any delay taps that fall in this buffer window.
+    //
+    // BUG FIX: this used to be gated on delayEnabled_ — but delayEnabled_
+    // is a single GLOBAL flag, re-pushed synchronously by Kotlin's
+    // syncDelayForHit() right before EVERY pad's trigger, including a pad
+    // that has no delay of its own. So: hit pad A (delay on) — taps get
+    // scheduled into delayTaps_ with A's decay/volume already baked in
+    // (see triggerPad) — then, before those taps are due, hit pad B (delay
+    // off) "at the same time" — syncDelayForHit(B) flips delayEnabled_ to
+    // false, and this gate then skipped fireDelayTaps() entirely, so A's
+    // already-scheduled echoes silently never fired at all. This is
+    // exactly "single hit mein delay chalta hai, multiple/simultaneous hit
+    // mein delay hat jata hai". delayEnabled_ only needs to gate whether
+    // NEW taps get SCHEDULED (still checked in triggerPad) — firing taps
+    // that are already queued must never depend on whatever pad happened
+    // to be hit most recently. fireDelayTaps() itself is cheap when the
+    // queue is empty (one mutex lock, no-op iteration), so calling it
+    // unconditionally every buffer costs nothing extra when delay isn't in
+    // use.
+    fireDelayTaps(numFrames);
 
     // Retrigger fade-out (~5ms) / concurrent-claim fade-in (~3ms) step
     // sizes — both depend only on outputSampleRate_, which is fixed for
@@ -500,8 +512,6 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
                 v.active.store(false, std::memory_order_release);
                 continue;
             }
-
-            activeVoiceCount++;
 
             float vol   = v.volume.load(std::memory_order_relaxed);
             float pitch = v.pitch.load(std::memory_order_relaxed);
@@ -583,18 +593,31 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // (2) replace the hard clamp with an actual soft-knee curve (tanh) so
     // any residual overshoot rolls off smoothly instead of brick-walling.
     //
-    // BUG FIX 2: the headroom scale above was recomputed FRESH every single
-    // callback buffer straight from activeVoiceCount, then applied instantly
-    // — so a still-ringing voice's gain visibly jumped every time another
-    // pad was hit or its voice ended (client-reported: "hit a pad, the next
-    // tone is quiet, then a moment later it gets loud again"). Smoothing the
-    // headroom instead of snapping it fixes that while keeping the same
-    // clipping protection. The smoothing is deliberately asymmetric — fast
-    // attack (headroom dropping, i.e. a new simultaneous hit needs
-    // protecting right now) so clipping is still caught immediately, slow
-    // release (headroom recovering back toward 1.0 as voices end) so the
-    // gain climbs back up gradually and inaudibly instead of snapping.
-    float targetHeadroom = 1.0f / std::max(1.0f, sqrtf(static_cast<float>(activeVoiceCount)));
+    // BUG FIX 3: the headroom scale used to be derived purely from
+    // activeVoiceCount (1/sqrt(N)) — that ducks the ENTIRE mix bus the
+    // instant a second pad is hit, regardless of whether the two voices
+    // were anywhere near clipping in the first place. Two moderately-loud
+    // pads hit back-to-back doesn't need any gain reduction at all, but the
+    // old formula ducked every time regardless — this is exactly what read
+    // as "pehla hit ka volume dab jata hai jaise hi dusra hit hota hai" /
+    // "aawaz thoda kam ho jata hai multiple play mein": the first voice's
+    // gain was being pulled down because of the SECOND voice starting, not
+    // because of anything about the first voice's own loudness.
+    //
+    // Fixed by measuring the actual peak of this buffer's mixed samples and
+    // only reducing gain when that peak would genuinely exceed unity — a
+    // real (if simple, look-behind-only) limiter instead of a preemptive,
+    // polyphony-count-based duck. Two voices that don't sum past 1.0 never
+    // trigger any gain reduction at all, so ordinary multi-pad playing is
+    // untouched; the smoothed asymmetric attack/release (fast down, slow
+    // up) is kept so genuinely loud stacking still gets caught immediately
+    // and recovers inaudibly rather than snapping, same as before.
+    float peak = 0.0f;
+    for (int32_t i = 0; i < numFrames * 2; i++) {
+        float a = fabsf(out[i]);
+        if (a > peak) peak = a;
+    }
+    float targetHeadroom = (peak > 1.0f) ? (1.0f / peak) : 1.0f;
     const float kAttackTimeSec  = 0.005f;  // 5ms  — protect against clipping fast
     const float kReleaseTimeSec = 0.20f;   // 200ms — recover gain slowly/inaudibly
     float bufferDurationSec = static_cast<float>(numFrames) / static_cast<float>(outputSampleRate_);

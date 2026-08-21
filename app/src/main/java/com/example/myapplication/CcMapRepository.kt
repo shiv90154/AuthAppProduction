@@ -5,29 +5,24 @@ import org.json.JSONObject
 
 /**
  * Persists MIDI CC (Control Change) -> named-target mappings, so a hardware
- * knob/button can be "learned" for any of: VOLUME, PITCH, EQ_LOW, EQ_MID,
- * EQ_HIGH, PATCH_NEXT, PATCH_PREV, EDIT, SAVE.
+ * knob/slider can be "learned" for any of: VOLUME, PITCH, EQ_LOW, EQ_MID,
+ * EQ_HIGH — continuous controls, where only a CC's 0-127 value stream can
+ * drive the knob's position.
+ *
+ * BUG FIX / CHANGE: PATCH_NEXT, PATCH_PREV, EDIT, SAVE, DELAY_TOGGLE,
+ * BANK_A, BANK_B, BANK_AB, and PAD_1..PAD_8 used to live here too, learned
+ * via CC. Moved to NoteMapRepository (button/action targets) and native
+ * Note-based pad mapping (MidiLearnRepository/MidiProcessor's existing
+ * "PAD NOTES" — PAD_1..8 removed here as redundant with that) — per client
+ * request, a physical button/pad on their hardware sends a MIDI Note, not
+ * a CC, so a CC-learn button for these never actually matched what LEARN
+ * was waiting for. Only genuinely continuous knobs remain CC-based here.
  *
  * Storage: SharedPreferences key "cc_mappings" -> JSON object { "TARGET": ccNumber }
  */
 object CcMapRepository {
 
-    val TARGETS = listOf(
-        "VOLUME", "PITCH", "EQ_LOW", "EQ_MID", "EQ_HIGH",
-        "PATCH_NEXT", "PATCH_PREV", "EDIT", "SAVE",
-        // NEW: DELAY_TOGGLE flips the currently-selected pad's own delay
-        // on/off (same action as RightPanel's quick DLY button/EQPanel's
-        // toggle). BANK_A/BANK_B/BANK_AB jump bankMode directly to that
-        // combination — a MIDI footswitch/button per bank, live-performance
-        // shortcut for switching banks hands-free.
-        "DELAY_TOGGLE", "BANK_A", "BANK_B", "BANK_AB",
-        // NEW: for MIDI pad controllers that send Control Change instead of
-        // Note-On when a pad is hit (some cheap/generic pad controllers do
-        // this instead of the GM drum-note convention the Note-On path
-        // assumes). Map each of these via MIDI Learn exactly like any other
-        // CC target — hit LEARN, then hit the physical pad.
-        "PAD_1", "PAD_2", "PAD_3", "PAD_4", "PAD_5", "PAD_6", "PAD_7", "PAD_8"
-    )
+    val TARGETS = listOf("VOLUME", "PITCH", "EQ_LOW", "EQ_MID", "EQ_HIGH")
 
     // Preserves the app's original fixed CC numbers as defaults so existing
     // hardware setups keep working without re-learning.

@@ -67,6 +67,11 @@ void MidiProcessor::noteOn(
         float velocityFraction = static_cast<float>(velocity) / 127.0f;
         onPadHit(pad, velocityFraction);
     }
+
+    if (onRawNoteOn)
+    {
+        onRawNoteOn(note, velocity);
+    }
 }
 
 void MidiProcessor::noteOff(int channel, int note)

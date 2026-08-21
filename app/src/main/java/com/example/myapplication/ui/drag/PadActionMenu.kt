@@ -22,13 +22,16 @@ fun PadActionMenu(
 ) {
     if (!visible) return
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
+        // Clamp against maxWidth instead of a fixed 260.dp so this menu can't
+        // exceed the available screen width on the smallest supported phones.
+        val menuWidth = (maxWidth * 0.7f).coerceIn(200.dp, 260.dp)
         Column(
             modifier = Modifier
-                .width(260.dp)
+                .width(menuWidth)
                 .background(Color(0xFF1E1E1E), RoundedCornerShape(16.dp))
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)

@@ -93,7 +93,7 @@ fun DelayPanel(
                     )
                     Box(
                         modifier = Modifier
-                            .size(22.dp)
+                            .size(28.dp)
                             .clip(RoundedCornerShape(50))
                             .background(Color(0xFF2A2A2A))
                             .clickable(remember { MutableInteractionSource() }, null) { onClose() },

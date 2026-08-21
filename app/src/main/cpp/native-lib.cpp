@@ -11,6 +11,7 @@ jmethodID g_ccCallback          = nullptr;   // onControlChangeFromNative(II)V
 jmethodID g_padHitCallback      = nullptr;   // onPadHitFromNative(IF)V
 jmethodID g_learnAssignedCallback = nullptr; // onMidiLearnAssigned(II)V
 jmethodID g_programChangeCallback = nullptr; // onProgramChangeFromNative(I)V
+jmethodID g_rawNoteCallback       = nullptr; // onRawNoteOnFromNative(II)V
 
 static MidiProcessor midiProcessor;
 static AudioEngine   audioEngine;
@@ -229,6 +230,7 @@ Java_com_example_myapplication_NativeBridge_setEqBands(
 void sendPadHitToKotlin(int padIndex, float velocity);
 void sendLearnAssignedToKotlin(int padNumber, int note);
 void sendProgramChangeToKotlin(int program);
+void sendRawNoteOnToKotlin(int note, int velocity);
 
 jint JNI_OnLoad(JavaVM* vm, void* reserved)
 {
@@ -243,10 +245,12 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved)
     g_padHitCallback        = env->GetStaticMethodID(g_bridgeClass, "onPadHitFromNative", "(IF)V");
     g_learnAssignedCallback = env->GetStaticMethodID(g_bridgeClass, "onMidiLearnAssigned", "(II)V");
     g_programChangeCallback = env->GetStaticMethodID(g_bridgeClass, "onProgramChangeFromNative", "(I)V");
+    g_rawNoteCallback       = env->GetStaticMethodID(g_bridgeClass, "onRawNoteOnFromNative", "(II)V");
 
     midiProcessor.onPadHit        = sendPadHitToKotlin;
     midiProcessor.onLearnAssigned = sendLearnAssignedToKotlin;
     midiProcessor.onProgramChange = sendProgramChangeToKotlin;
+    midiProcessor.onRawNoteOn     = sendRawNoteOnToKotlin;
 
     return JNI_VERSION_1_6;
 }
@@ -281,4 +285,12 @@ void sendProgramChangeToKotlin(int program)
     JNIEnv* env = nullptr;
     g_vm->AttachCurrentThread(&env, nullptr);
     env->CallStaticVoidMethod(g_bridgeClass, g_programChangeCallback, (jint)program);
+}
+
+void sendRawNoteOnToKotlin(int note, int velocity)
+{
+    if (!g_vm || !g_bridgeClass || !g_rawNoteCallback) return;
+    JNIEnv* env = nullptr;
+    g_vm->AttachCurrentThread(&env, nullptr);
+    env->CallStaticVoidMethod(g_bridgeClass, g_rawNoteCallback, (jint)note, (jint)velocity);
 }

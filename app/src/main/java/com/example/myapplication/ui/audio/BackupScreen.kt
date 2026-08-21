@@ -6,7 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -20,6 +22,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myapplication.CcMapRepository
+import com.example.myapplication.NoteMapRepository
 import com.example.myapplication.MidiLearnRepository
 import com.example.myapplication.ui.BtnActive
 import com.example.myapplication.ui.KitRepository
@@ -100,6 +103,10 @@ fun BackupScreen(onClose: () -> Unit) {
                 .padding(24.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(PanelBg)
+                // Safety net for short-height screens — this dialog's content is
+                // normally short enough not to need it, but a fixed non-scrolling
+                // Column would silently clip on the shortest supported screens.
+                .verticalScroll(rememberScrollState())
                 .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -184,6 +191,7 @@ private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
             root.put("kits", KitRepository.exportBackup())
             root.put("preferences", PreferencesRepository.exportBackup())
             CcMapRepository.exportBackup()?.let { root.put("ccMap", it) }
+            NoteMapRepository.exportBackup()?.let { root.put("noteActionMap", it) }
             MidiLearnRepository.exportBackup()?.let { root.put("midiNoteMap", it) }
             root.put("audios", audiosJson)
 
@@ -239,11 +247,13 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
         root.optJSONObject("kits")?.let { KitRepository.validateBackupPayload(it) }
         root.optJSONObject("preferences")?.let { PreferencesRepository.validateBackupPayload(it) }
         if (root.has("ccMap")) CcMapRepository.validateBackupPayload(root.getString("ccMap"))
+        if (root.has("noteActionMap")) NoteMapRepository.validateBackupPayload(root.getString("noteActionMap"))
         if (root.has("midiNoteMap")) MidiLearnRepository.validateBackupPayload(root.getString("midiNoteMap"))
 
         root.optJSONObject("kits")?.let { KitRepository.importBackup(it) }
         root.optJSONObject("preferences")?.let { PreferencesRepository.importBackup(it) }
         if (root.has("ccMap")) CcMapRepository.importBackup(root.getString("ccMap"))
+        if (root.has("noteActionMap")) NoteMapRepository.importBackup(root.getString("noteActionMap"))
         if (root.has("midiNoteMap")) MidiLearnRepository.importBackup(root.getString("midiNoteMap"))
 
         var restoredCount = 0

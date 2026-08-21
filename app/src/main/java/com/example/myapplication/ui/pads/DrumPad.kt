@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
@@ -188,8 +189,13 @@ fun DrumPad(
 
                 Box(
                     modifier = Modifier
-                        .padding(start = 50.dp, end = 50.dp, top = 3.dp)
-                        .fillMaxWidth()
+                        .padding(top = 3.dp)
+                        // Fractional width instead of a fixed 50.dp side padding —
+                        // a fixed dp inset could exceed the pad's own width once the
+                        // 4-across pad row shrinks a pad below ~100.dp on small screens,
+                        // clipping the LED bar entirely.
+                        .fillMaxWidth(0.5f)
+                        .align(Alignment.CenterHorizontally)
                         .height(3.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .background(
@@ -219,8 +225,9 @@ fun DrumPad(
 
                 Box(
                     modifier = Modifier
-                        .padding(start = 50.dp, end = 50.dp, bottom = 3.dp)
-                        .fillMaxWidth()
+                        .padding(bottom = 3.dp)
+                        .fillMaxWidth(0.5f)
+                        .align(Alignment.CenterHorizontally)
                         .height(3.dp)
                         .clip(RoundedCornerShape(4.dp))
                         .background(

@@ -21,25 +21,38 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.myapplication.CcMapRepository
 import com.example.myapplication.CcLearnState
+import com.example.myapplication.NoteMapRepository
+import com.example.myapplication.NoteLearnState
 import com.example.myapplication.MidiLearnRepository
 import com.example.myapplication.MidiEventBus
 import com.example.myapplication.NativeBridge
 
 /**
- * MidiLearnScreen — MIDI mapping UI, both Note and CC.
+ * MidiLearnScreen — MIDI mapping UI.
  *
- * A pad can be triggered by EITHER a MIDI Note (the common case for real
- * drum pad controllers — GM defaults are pre-filled, LEARN just overrides
- * one) OR a CC (PAD_1..PAD_8 below, for controllers that send Control
- * Change instead of Note-On for pad hits). Both paths are always live —
- * whichever the controller actually sends triggers the pad.
+ * Pad triggering is Note-only: a real drum-pad controller sends Note-On for
+ * a pad hit, so pad mapping (below, "PAD NOTES") is always Note-based — GM
+ * defaults are pre-filled, LEARN just overrides one. There used to also be
+ * a CC-based PAD_1..PAD_8 path for controllers that sent CC instead; that's
+ * removed — a physical pad press is a Note-On, not a knob/CC sweep, so a
+ * CC-learn button for it never actually matched what the hardware sent.
  *
- * Note LEARN: tap LEARN on a pad row → NativeBridge.enableMidiLearn(pad) →
- * native listens for the next Note-On → MidiEventBus.onLearnAssigned fires
- * → saved to MidiLearnRepository and applied immediately.
+ * Button/action targets (PATCH_NEXT, PATCH_PREV, EDIT, SAVE, DELAY_TOGGLE,
+ * BANK_A/B/AB — "ACTIONS" below) are Note-based too, for the same reason:
+ * these map to a physical button/pad on the controller, which sends a
+ * Note-On, not a CC. Only genuinely continuous knobs (VOLUME, PITCH, EQ —
+ * "KNOBS" below) stay CC-based, since only a CC's 0-127 value stream can
+ * drive a continuous slider.
  *
- * CC LEARN: tap LEARN on a target row → screen listens for the next CC
- * message → CcLearnState captures it → mapping is saved to CcMapRepository.
+ * Note LEARN (pads and actions alike): tap LEARN on a row → the row starts
+ * listening for the next Note-On (pads go through native
+ * enableMidiLearn/onLearnAssigned; actions go through NoteLearnState,
+ * consumed by OctapadScreen's MidiEventBus.onRawNoteOn) → mapping is saved
+ * and applied immediately, row shows "Waiting for Note…" while listening.
+ *
+ * CC LEARN (knobs only): tap LEARN on a target row → screen listens for the
+ * next CC message → CcLearnState captures it → mapping is saved to
+ * CcMapRepository.
  */
 @Composable
 fun MidiLearnScreen(
@@ -53,6 +66,7 @@ fun MidiLearnScreen(
     // Init repositories
     LaunchedEffect(Unit) {
         CcMapRepository.init(context)
+        NoteMapRepository.init(context)
         MidiLearnRepository.init(context)
     }
 
@@ -82,11 +96,30 @@ fun MidiLearnScreen(
             // instead of acting normally — clearing here on every dispose
             // path guarantees it can't get stuck.
             CcLearnState.listeningForTarget.value = null
+            // Same reasoning as CcLearnState above, for the Note-based
+            // action targets — clear on every dispose path so a note never
+            // gets silently consumed as a learn after this screen closes.
+            NoteLearnState.listeningForTarget.value = null
         }
     }
 
-    // ── CC (knob/button/pad) mappings: Volume, Pitch, EQ, Patch, Edit, Save,
-    // and PAD_1..PAD_8 (a controller pad hit) ──────────────────────────────
+    // ── Note (action/button target) mappings ──────────────────────────────────
+    val noteActionMappings = remember {
+        mutableStateMapOf<String, Int>().also { map ->
+            NoteMapRepository.loadAll().forEach { (target, note) -> map[target] = note }
+        }
+    }
+    val listeningNoteTarget = NoteLearnState.listeningForTarget.value
+
+    LaunchedEffect(NoteLearnState.lastAssigned.value) {
+        val assigned = NoteLearnState.lastAssigned.value
+        if (assigned != null) {
+            noteActionMappings[assigned.first] = assigned.second
+            NoteLearnState.lastAssigned.value = null
+        }
+    }
+
+    // ── CC (continuous knob) mappings: Volume, Pitch, EQ only ──────────────────
     val ccMappings = remember {
         mutableStateMapOf<String, Int>().also { map ->
             CcMapRepository.loadAll().forEach { (target, cc) -> map[target] = cc }
@@ -104,9 +137,6 @@ fun MidiLearnScreen(
 
     // Status message
     var statusMsg by remember { mutableStateOf("Tap LEARN on a row, then hit/move the matching control") }
-
-    val padTargets = (1..8).map { "PAD_$it" }
-    val otherTargets = CcMapRepository.TARGETS.filter { it !in padTargets }
 
     // ── UI ────────────────────────────────────────────────────────────────────
     Box(
@@ -171,7 +201,7 @@ fun MidiLearnScreen(
                     .clip(RoundedCornerShape(8.dp))
                     .background(
                         when {
-                            listeningTarget != null || learningPad != null -> Color(0xFF330033)
+                            listeningTarget != null || listeningNoteTarget != null || learningPad != null -> Color(0xFF330033)
                             statusMsg.contains("cleared") -> Color(0xFF003322)
                             else -> Color(0xFF1A1A1A)
                         }
@@ -179,7 +209,7 @@ fun MidiLearnScreen(
                     .border(
                         width = 1.dp,
                         color = when {
-                            listeningTarget != null || learningPad != null -> Color(0xFFFF00FF)
+                            listeningTarget != null || listeningNoteTarget != null || learningPad != null -> Color(0xFFFF00FF)
                             else -> Color(0xFF2A2A2A)
                         },
                         shape = RoundedCornerShape(8.dp)
@@ -190,7 +220,7 @@ fun MidiLearnScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    if (listeningTarget != null || learningPad != null) {
+                    if (listeningTarget != null || listeningNoteTarget != null || learningPad != null) {
                         Box(
                             modifier = Modifier
                                 .size(10.dp)
@@ -201,15 +231,16 @@ fun MidiLearnScreen(
                     Text(
                         text = when {
                             learningPad != null -> "Listening for PAD ${learningPad!! + 1}… hit the controller pad now"
-                            listeningTarget != null -> "Listening for $listeningTarget… move the knob or press the button now"
+                            listeningNoteTarget != null -> "Waiting for Note… hit/press the controller button for $listeningNoteTarget now"
+                            listeningTarget != null -> "Listening for $listeningTarget… move the knob now"
                             else -> statusMsg
                         },
                         color = when {
-                            listeningTarget != null || learningPad != null -> Color(0xFFFF88FF)
+                            listeningTarget != null || listeningNoteTarget != null || learningPad != null -> Color(0xFFFF88FF)
                             else -> Color(0xFF888888)
                         },
                         fontSize = 10.sp,
-                        fontWeight = if (listeningTarget != null || learningPad != null) FontWeight.Bold else FontWeight.Normal
+                        fontWeight = if (listeningTarget != null || listeningNoteTarget != null || learningPad != null) FontWeight.Bold else FontWeight.Normal
                     )
                 }
             }
@@ -328,19 +359,14 @@ fun MidiLearnScreen(
                 item {
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "PADS (CC)  •  FOR CONTROLLERS THAT SEND CC INSTEAD",
+                        "KNOBS  •  CONTINUOUS CONTROLS, CC ONLY",
                         color = BtnActive, fontSize = 10.sp,
                         fontWeight = FontWeight.Bold, letterSpacing = 1.sp
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "No built-in defaults — LEARN each pad once before hardware triggers it.",
-                        color = Color(0xFF888888), fontSize = 8.sp
                     )
                     Spacer(Modifier.height(6.dp))
                 }
 
-                items(padTargets) { target ->
+                items(CcMapRepository.TARGETS) { target ->
                     val cc = ccMappings[target] ?: -1
                     val isListening = listeningTarget == target
 
@@ -351,10 +377,10 @@ fun MidiLearnScreen(
                         onLearn = {
                             if (isListening) {
                                 CcLearnState.listeningForTarget.value = null
-                                statusMsg = "Cancelled. Tap LEARN to map a pad."
+                                statusMsg = "Cancelled. Tap LEARN to map a knob."
                             } else {
                                 CcLearnState.listeningForTarget.value = target
-                                statusMsg = "Hit the controller pad you want mapped to $target"
+                                statusMsg = "Move the knob for $target"
                             }
                         },
                         onClear = {
@@ -369,34 +395,39 @@ fun MidiLearnScreen(
                 item {
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "KNOBS & BUTTONS",
+                        "ACTIONS  •  BUTTON/PAD TRIGGERS, NOTE ONLY",
                         color = BtnActive, fontSize = 10.sp,
                         fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "No built-in defaults — LEARN each once before hardware triggers it.",
+                        color = Color(0xFF888888), fontSize = 8.sp
                     )
                     Spacer(Modifier.height(6.dp))
                 }
 
-                items(otherTargets) { target ->
-                    val cc = ccMappings[target] ?: -1
-                    val isListening = listeningTarget == target
+                items(NoteMapRepository.TARGETS) { target ->
+                    val note = noteActionMappings[target] ?: -1
+                    val isListening = listeningNoteTarget == target
 
-                    CcTargetRow(
+                    NoteTargetRow(
                         target = target,
-                        ccNumber = cc,
+                        note = note,
                         isListening = isListening,
                         onLearn = {
                             if (isListening) {
-                                CcLearnState.listeningForTarget.value = null
-                                statusMsg = "Cancelled. Tap LEARN to map a knob/button."
+                                NoteLearnState.listeningForTarget.value = null
+                                statusMsg = "Cancelled. Tap LEARN to map an action."
                             } else {
-                                CcLearnState.listeningForTarget.value = target
-                                statusMsg = "Move the knob/press the button for $target"
+                                NoteLearnState.listeningForTarget.value = target
+                                statusMsg = "Hit/press the controller button for $target"
                             }
                         },
                         onClear = {
-                            CcMapRepository.clear(target)
-                            ccMappings[target] = CcMapRepository.getCc(target)
-                            if (listeningTarget == target) CcLearnState.listeningForTarget.value = null
+                            NoteMapRepository.clear(target)
+                            noteActionMappings[target] = NoteMapRepository.getNote(target)
+                            if (listeningNoteTarget == target) NoteLearnState.listeningForTarget.value = null
                             statusMsg = "$target mapping cleared"
                         }
                     )
@@ -423,6 +454,12 @@ fun MidiLearnScreen(
                                     ccMappings[target] = CcMapRepository.getCc(target)
                                 }
                                 CcLearnState.listeningForTarget.value = null
+
+                                NoteMapRepository.TARGETS.forEach { target ->
+                                    NoteMapRepository.clear(target)
+                                    noteActionMappings[target] = NoteMapRepository.getNote(target)
+                                }
+                                NoteLearnState.listeningForTarget.value = null
 
                                 val gmDefaults = intArrayOf(36, 48, 51, 49, 45, 46, 42, 38)
                                 for (pad in 0..7) {
@@ -607,6 +644,85 @@ private fun CcTargetRow(
         }
 
         if (ccNumber >= 0) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color(0xFF2A1010))
+                    .pointerInput(Unit) { detectTapGestures { onClear() } },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("✕", color = Color(0xFFFF6666), fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+// ── Note action-target row composable ───────────────────────────────────────
+// Same layout as CcTargetRow, but for a button/action target learned via a
+// MIDI Note instead of a CC (see NoteMapRepository) — "Waiting for Note…"
+// while listening, "Note N" once mapped.
+
+@Composable
+private fun NoteTargetRow(
+    target: String,
+    note: Int,
+    isListening: Boolean,
+    onLearn: () -> Unit,
+    onClear: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                when {
+                    isListening -> Color(0xFF2A0033)
+                    note >= 0 -> Color(0xFF001A2E)
+                    else -> Color(0xFF1E1E1E)
+                }
+            )
+            .border(
+                width = if (isListening) 1.dp else 0.dp,
+                color = if (isListening) Color(0xFFFF00FF) else Color.Transparent,
+                shape = RoundedCornerShape(10.dp)
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                target.replace("_", " "),
+                color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = if (isListening) "Waiting for Note…" else if (note >= 0) "${midiNoteName(note)} ($note)" else "Unmapped",
+                color = when {
+                    isListening -> Color(0xFFFF88FF)
+                    note >= 0 -> Color(0xFF00E5FF)
+                    else -> Color(0xFF666666)
+                },
+                fontSize = 9.sp
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(if (isListening) Color(0xFFFF00FF) else Color(0xFF2A2A2A))
+                .pointerInput(Unit) { detectTapGestures { onLearn() } }
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (isListening) "CANCEL" else "LEARN",
+                color = if (isListening) Color.Black else Color(0xFFAAAAAA),
+                fontSize = 9.sp, fontWeight = FontWeight.Bold
+            )
+        }
+
+        if (note >= 0) {
             Box(
                 modifier = Modifier
                     .size(28.dp)

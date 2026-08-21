@@ -145,7 +145,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     }
 
     var loopEnabled by remember { mutableStateOf(PreferencesRepository.loadLoopEnabled()) }
-    var exclusiveMode by remember { mutableStateOf(PreferencesRepository.loadExclusiveMode()) }
     var velocityOn by remember { mutableStateOf(PreferencesRepository.loadVelocityOn()) }
     var midiChannel by remember { mutableStateOf(PreferencesRepository.loadMidiChannel()) }
     var currentStreamId by remember { mutableStateOf(0) }
@@ -197,11 +196,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // onto another pad and released — far too easy to trigger by accident.
     // Now gated on a hold: see beginTwoFingerHold()/endTwoFingerHold() below.
     var dragHoldJob by remember { mutableStateOf<Job?>(null) }
-    // Becomes true once the 2-finger press on the FIRST (source) pad has
-    // been held continuously for 3.5s — from then on, wherever the fingers
-    // are/move to is tracked live (hover), same as before this gate existed.
-    // Not whether the finger happens to be sitting on a second pad exactly
-    // at the 3.5s mark — that was the actual bug, see beginTwoFingerHold().
+    // Becomes true once the 2-finger press has been held continuously for
+    // 2s — only then does the drag/drop preview appear at all and start
+    // tracking the fingers. See beginTwoFingerHold()/endTwoFingerHold().
     var holdArmed by remember { mutableStateOf(false) }
 
 
@@ -382,6 +379,25 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         if (currentKitB !in kits.indices) currentKitB = 0
     }
 
+    // BUG FIX: Bank A and Bank B both index into the SAME shared `kits`
+    // list — there's only one 200-slot kit pool, not a separate one per
+    // bank. If both banks ever land on the same kit number, they are
+    // literally the same Kit object (same volumes/pitches/chokeGroups/
+    // sounds/...), so editing a knob on one bank silently edited the other
+    // too — reported as "B bank use karne par A bank bigad jata hai".
+    // Whenever the two selections collide (from either bank's own
+    // prev/next stepping or its patch-list picker), nudge Bank B off Bank
+    // A's slot onto a neighboring one so the two banks can never alias the
+    // same kit at the same time. Bank A's own selection is deliberately
+    // never moved here — only Bank B yields, matching how the bug reads
+    // from the user's side ("A bank" is the one that shouldn't get
+    // disturbed by touching B).
+    LaunchedEffect(currentKit, currentKitB) {
+        if (currentKitB == currentKit && kits.size > 1) {
+            currentKitB = if (currentKit < kits.lastIndex) currentKit + 1 else currentKit - 1
+        }
+    }
+
     // BUG FIX: the pad VOL/PITCH controls (and the matching MIDI CC handlers)
     // used to always read/write kits[currentKit] — Bank A's kit — no matter
     // which bank was actually selected via the A/B/C buttons. Moving the
@@ -515,7 +531,20 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     }
 
     var showKitList  by remember { mutableStateOf(false) }
+    // NEW: which bank the open KitListScreen selects into — false = Bank A's
+    // currentKit (the original behavior), true = Bank B's currentKitB (so
+    // Bank B can jump straight to a kit number instead of only stepping
+    // through neighbors with < / >).
+    var kitListTargetsBankB by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    // BUG FIX: the rename dialog used to reuse `currentKit` (Bank A's
+    // selection) as the index of whichever kit was being renamed. Opening
+    // rename from Bank B's patch list therefore had to set currentKit =
+    // index just to make the dialog work — silently switching Bank A's
+    // active kit as a side effect of renaming something in Bank B. A
+    // dedicated index decouples "which kit is being renamed" from "which
+    // kit Bank A currently has selected".
+    var renameKitIndex by remember { mutableStateOf(-1) }
     // NEW: which kit's single-patch export dialog is open, -1 = none
     var exportPatchKitIndex by remember { mutableStateOf(-1) }
     var newKitName by remember { mutableStateOf("") }
@@ -689,7 +718,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         val assigned = AudioRepository.audioForPad(bankKitIdx(), index)
         val uriToShow: Uri?
         val durationToShow: Long
-        if (exclusiveMode && currentStreamId != 0) {
+        if (currentStreamId != 0) {
             soundPool.stop(currentStreamId)
         }
         if (assigned != null) {
@@ -721,33 +750,38 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         val myLoopToken = System.nanoTime()
         loopTokens[index] = myLoopToken
 
-        if (exclusiveMode) {
-            // BUG FIX: choke used to be read only from kits[currentKit] (Bank
-            // A), so hitting a pad while Bank B/C was active (alone or
-            // layered with A) never choked anything — the level/membership
-            // check was against a kit that might not even be one of the
-            // currently-active banks. Now every ACTIVE bank's own choke
-            // level + group membership is checked, so a pad hit on Bank A
-            // layered with Bank B/C chokes correctly across the combination.
-            val bankKitIdxs = buildList {
-                if ('A' in bankMode) add(currentKit)
-                if ('B' in bankMode) add(currentKitB)
-            }.filter { it in kits.indices }
+        // BUG FIX: choke used to be gated behind a separate "Exclusive Mode"
+        // toggle AND an "Active Level" selector — two extra switches on top
+        // of a pad's own choke-group membership, both of which had to be
+        // set correctly before choke did anything at all. That's exactly
+        // what read as "choke kaam nahi kar raha hai" (choke doesn't work).
+        // Simplified per request: choke groups are just always live — any
+        // two pads sharing the same non-NONE level (1-4) always choke each
+        // other reciprocally, nothing else to turn on first.
+        //
+        // Also: choke used to be read only from kits[currentKit] (Bank A),
+        // so hitting a pad while Bank B was active never choked anything —
+        // the membership check was against a kit that might not even be
+        // one of the currently-active banks. Every ACTIVE bank's own group
+        // membership is checked, so a pad hit on Bank A layered with Bank B
+        // chokes correctly across the combination.
+        val bankKitIdxs = buildList {
+            if ('A' in bankMode) add(currentKit)
+            if ('B' in bankMode) add(currentKitB)
+        }.filter { it in kits.indices }
 
-            fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdxs.any { bankKit ->
-                val activeLevel = kits[bankKit].activeChokeLevelState.value
-                activeLevel != 0 &&
-                    activeLevel in kits[bankKit].chokeGroups[padA] &&
-                    activeLevel in kits[bankKit].chokeGroups[padB]
+        fun chokesTogether(padA: Int, padB: Int): Boolean = bankKitIdxs.any { bankKit ->
+            kits[bankKit].chokeGroups[padA].any { level ->
+                level != 0 && level in kits[bankKit].chokeGroups[padB]
             }
+        }
 
-            if (bankKitIdxs.isNotEmpty()) {
-                chokeActivePads.keys.toList().forEach { otherPad ->
-                    if (otherPad != index && chokesTogether(index, otherPad)) {
-                        nativeSlotsFor(otherPad).forEach { DrumEngine.stop(it) }
-                        loopTokens[otherPad] = -1L
-                        chokeActivePads.remove(otherPad)
-                    }
+        if (bankKitIdxs.isNotEmpty()) {
+            chokeActivePads.keys.toList().forEach { otherPad ->
+                if (otherPad != index && chokesTogether(index, otherPad)) {
+                    nativeSlotsFor(otherPad).forEach { DrumEngine.stop(it) }
+                    loopTokens[otherPad] = -1L
+                    chokeActivePads.remove(otherPad)
                 }
             }
         }
@@ -813,9 +847,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
             }
             currentlyPlayingPad = index
-            if (exclusiveMode) {
-                chokeActivePads[index] = token
-            }
+            chokeActivePads[index] = token
         }
 
         pressedPads[index] = true
@@ -973,8 +1005,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         AudioRepository.init(context)
         DrumEngine.ensureStarted()
         // Restore any saved Note->pad mappings into native (pads with no
-        // saved mapping keep native's GM default) — coexists with CC-based
-        // pad mapping via CcMapRepository's PAD_1..PAD_8 targets.
+        // saved mapping keep native's GM default) — this is the only way a
+        // MIDI controller triggers a pad (CC-based PAD_1..PAD_8 mapping was
+        // removed; a physical pad hit is always a Note-On, never a CC).
         MidiLearnRepository.init(context)
         MidiLearnRepository.loadAll().forEach { (pad, note) ->
             NativeBridge.assignMidiNote(pad, note)
@@ -988,6 +1021,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             if (kits.isNotEmpty()) {
                 currentKit = program.coerceIn(0, kits.lastIndex)
             }
+        }
+    }
+
+    // Hardware Tab key (MainActivity.dispatchKeyEvent) → force EDIT MODE off.
+    LaunchedEffect(Unit) {
+        MidiEventBus.onExitEditMode = {
+            editModeOn = false
         }
     }
 
@@ -1079,7 +1119,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // NEW: Persist remaining app state so re-opening the app resumes exactly
     // where it was left off, instead of resetting to defaults.
     LaunchedEffect(loopEnabled)     { PreferencesRepository.saveLoopEnabled(loopEnabled) }
-    LaunchedEffect(exclusiveMode)   { PreferencesRepository.saveExclusiveMode(exclusiveMode) }
     LaunchedEffect(velocityOn)      { PreferencesRepository.saveVelocityOn(velocityOn) }
     LaunchedEffect(midiChannel) {
         PreferencesRepository.saveMidiChannel(midiChannel)
@@ -1151,7 +1190,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     LaunchedEffect(Unit) {
         MidiEventBus.onControlChange = onCc@{ ccNumber, ccValue ->
             val normalized = (ccValue / 127f).coerceIn(0f, 1f)
-            val buttonPressed = ccValue > 63   // treat as a momentary button for the non-continuous targets
 
             // If the MIDI CC mapping screen is waiting to learn a target,
             // bind this CC to it instead of acting on it.
@@ -1218,53 +1256,66 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     persistKitsDebounced()
                 }
 
-                cc.getCc("PATCH_NEXT") -> {
-                    if (buttonPressed && currentKit < kits.lastIndex) currentKit++
+            }
+        }
+    }
+
+    // ── MIDI Note (button/action targets) ────────────────────────────────────
+    // PATCH_NEXT/PATCH_PREV/EDIT/SAVE/DELAY_TOGGLE/BANK_A/BANK_B/BANK_AB used
+    // to be CC-learned (see CcMapRepository's comment for why that moved) —
+    // now driven by a raw Note-On via NoteMapRepository/NoteLearnState,
+    // exactly parallel to the CC handler above but keyed by MIDI note number
+    // instead of CC number. Pad triggering itself stays on the existing
+    // native Note-based path (MidiLearnRepository/MidiProcessor) — untouched
+    // here, this only covers the non-pad button/action targets.
+    LaunchedEffect(Unit) {
+        com.example.myapplication.NoteMapRepository.init(context)
+    }
+
+    LaunchedEffect(Unit) {
+        MidiEventBus.onRawNoteOn = onNote@{ note, velocity ->
+            // If the MIDI mapping screen is waiting to learn a target, bind
+            // this note to it instead of acting on it.
+            val listening = com.example.myapplication.NoteLearnState.listeningForTarget.value
+            if (listening != null) {
+                com.example.myapplication.NoteMapRepository.save(listening, note)
+                com.example.myapplication.NoteLearnState.lastAssigned.value = listening to note
+                com.example.myapplication.NoteLearnState.listeningForTarget.value = null
+                return@onNote
+            }
+
+            val nm = com.example.myapplication.NoteMapRepository
+            when (note) {
+                nm.getNote("PATCH_NEXT") -> {
+                    if (currentKit < kits.lastIndex) currentKit++
                 }
 
-                cc.getCc("PATCH_PREV") -> {
-                    if (buttonPressed && currentKit > 0) currentKit--
+                nm.getNote("PATCH_PREV") -> {
+                    if (currentKit > 0) currentKit--
                 }
 
-                cc.getCc("EDIT") -> {
-                    if (buttonPressed) topPanel = "EDIT"
+                nm.getNote("EDIT") -> {
+                    topPanel = "EDIT"
                 }
 
-                cc.getCc("SAVE") -> {
-                    if (buttonPressed) persistKits()
+                nm.getNote("SAVE") -> {
+                    persistKits()
                 }
 
-                cc.getCc("DELAY_TOGGLE") -> {
-                    if (buttonPressed) setCurPadDelayEnabled(!curPadDelayEnabled)
+                nm.getNote("DELAY_TOGGLE") -> {
+                    setCurPadDelayEnabled(!curPadDelayEnabled)
                 }
 
-                cc.getCc("BANK_A") -> {
-                    if (buttonPressed) bankMode = "A"
+                nm.getNote("BANK_A") -> {
+                    bankMode = "A"
                 }
 
-                cc.getCc("BANK_B") -> {
-                    if (buttonPressed) bankMode = "B"
+                nm.getNote("BANK_B") -> {
+                    bankMode = "B"
                 }
 
-                cc.getCc("BANK_AB") -> {
-                    if (buttonPressed) bankMode = "AB"
-                }
-
-                // Pad mapping is CC-only: note-based mapping was removed, so
-                // this is the only way a physical controller triggers a pad.
-                // Map PAD_1..PAD_8 via the MIDI Learn screen exactly like any
-                // other CC target — there's no built-in default, so a pad
-                // stays unmapped until it's explicitly learned once.
-                else -> {
-                    for (padNum in 1..8) {
-                        if (ccNumber == cc.getCc("PAD_$padNum") && cc.getCc("PAD_$padNum") != -1) {
-                            if (buttonPressed) {
-                                selectedPad = padNum - 1
-                                onPadHit(padNum - 1, normalized)
-                            }
-                            break
-                        }
-                    }
+                nm.getNote("BANK_AB") -> {
+                    bankMode = "AB"
                 }
             }
         }
@@ -1368,14 +1419,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             groups.clear()
             groups.add(level)
         }
-        persistKits()
-    }
-
-    // NEW: sets (or clears, if the same level is tapped again) the active
-    // choke level for the current kit, then persists it.
-    fun setActiveChokeLevel(level: Int) {
-        val current = kits[bankKitIdx()].activeChokeLevelState
-        current.value = if (current.value == level) 0 else level
         persistKits()
     }
 
@@ -1526,25 +1569,18 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // required, so it fired on any quick 2-finger tap/brush, not just a
     // deliberate drag.
     //
-    // BUG FIX: the first version of this gate computed the target pad ONCE,
-    // in a fixed one-shot job that fired exactly 3.5s after the initial
-    // 2-finger press-down — so whichever pad the fingers happened to be
-    // sitting on at that precise instant was locked in as the target. That
-    // meant the 3.5s effectively had to be spent hovering the SECOND pad
-    // already, not held on the first pad and then dragged over afterward —
-    // if the user pressed pad A, waited, then moved to pad B only near/after
-    // the 3.5s mark, the snapshot could miss it entirely and the menu never
-    // appeared. The 3.5s is meant to arm the gesture (measured from the
-    // press on the first/source pad), not to force the finger to already be
-    // parked on the destination the instant the timer fires. Now the timer
-    // only flips `holdArmed` true after 3.5s of continuous holding — from
-    // that point on the drag position is tracked live (hover), exactly like
-    // before this gate existed — and the target pad is resolved from
-    // wherever the fingers actually are at RELEASE (endTwoFingerHold), same
-    // as the pre-gate behavior, just now requiring the press to have lasted
-    // 3.5s+ in total before it's honored.
+    // BUG FIX: an earlier version of this gate set dragVisible = true (the
+    // floating drag/drop preview) IMMEDIATELY on the 2-finger press, before
+    // any delay — only the final menu-on-release was actually gated, so the
+    // drag visual itself still popped up the instant 2 fingers touched
+    // down, which read as "hold isn't doing anything." Simplified: the
+    // drag preview and live position tracking don't start at all until 2s
+    // of continuous holding have passed — releasing before that cancels
+    // silently and nothing was ever shown. Once armed, this goes back to
+    // exactly the original pre-gate behavior (drag to another pad, release
+    // to open the menu if the target differs from the source) — no extra
+    // "hover" tracking logic layered on top.
     fun beginTwoFingerHold(padNum: Int, startX: Float, startY: Float) {
-        dragVisible = true
         dragPad = padNum
         sourcePad = padNum
         dragX = startX
@@ -1552,8 +1588,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         holdArmed = false
         dragHoldJob?.cancel()
         dragHoldJob = scope.launch {
-            delay(3500L)
+            delay(2000L)
             holdArmed = true
+            dragVisible = true
         }
     }
 
@@ -1561,9 +1598,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         dragHoldJob?.cancel()
         dragHoldJob = null
         dragVisible = false
-        // Only honor the release if the press lasted the full 3.5s — a
+        // Only honor the release if the press lasted the full 2s — a
         // release before that (holdArmed still false) cancels silently,
-        // same as before, the menu never appears at all.
+        // nothing was ever shown and the menu never appears.
         if (holdArmed) {
             targetPad = detectTargetPad()
             if (targetPad != -1 && targetPad != sourcePad) {
@@ -1877,7 +1914,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 controlPanelWidth = controlPanelWidth,
                 loopEnabled = loopEnabled,
-                exclusiveMode = exclusiveMode,
                 onLoopChange = {
                     loopEnabled = it
 
@@ -1888,24 +1924,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 },
                 bpm = bpm,
                 onBpmChange = { bpm = it },
-                onExclusiveChange = { exclusiveMode = it },
                 velocityOn = velocityOn,
                 onVelocityChange = { velocityOn = it },
                 // NEW: pass ALL pads' choke-group membership (not just selected pad)
                 // so the EQ panel can show a level-first picker.
 
-                // BUG FIX: allPadChokeGroups/activeChokeLevel/toggleChokeGroup/
-                // setActiveChokeLevel and every per-pad control below used to
-                // read/write kits[currentKit] (Bank A) unconditionally — the
-                // same bug the volume/pitch sliders had. All now target
-                // bankKitIdx() so the CHOKE grid, FX knobs and LOOP panel
-                // controls actually affect whichever bank is selected.
+                // BUG FIX: allPadChokeGroups/toggleChokeGroup and every per-pad
+                // control below used to read/write kits[currentKit] (Bank A)
+                // unconditionally — the same bug the volume/pitch sliders had.
+                // All now target bankKitIdx() so the CHOKE grid, FX knobs and
+                // LOOP panel controls actually affect whichever bank is
+                // selected.
                 allPadChokeGroups = kits[bankKitIdx()].chokeGroups.map { it.toList() },
                 onToggleChokeGroup = { padIndex, level -> toggleChokeGroup(padIndex, level) },
-                // NEW: which level is currently active/live for this kit
-                activeChokeLevel = kits[bankKitIdx()].activeChokeLevelState.value,
-                onSelectActiveChokeLevel = { level -> setActiveChokeLevel(level) },
-
 
                 delayEnabled  = curPadDelayEnabled,
                 delayChokePad = delayChokePad,
@@ -2048,7 +2079,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onKitDelete   = { deleteKit(currentKit) },
                 onKitPrev     = { if (currentKit > 0) currentKit-- },
                 onKitNext     = { if (currentKit < kits.lastIndex) currentKit++ },
-                onOpenKitList = { showKitList = true },
+                onOpenKitList = { kitListTargetsBankB = false; showKitList = true },
+                onOpenKitListB = { kitListTargetsBankB = true; showKitList = true },
                 // ── NEW callbacks ──────────────────────────────────────────────
                 onOpenImport = { importTargetPad = null; topPanel = "IMPORT" },
                 onOpenAudios = { topPanel = "AUDIOS" },
@@ -2063,6 +2095,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onOpenImportPatch = { topPanel = "IMPORT_PATCH" },
 
                 onRenameKit = {
+                    renameKitIndex = currentKit
                     newKitName = kits[currentKit].name
                     showRenameDialog = true
                 },
@@ -2127,12 +2160,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         }
 
         // ── KitListScreen overlay ─────────────────────────────────────────────
+        // Shared between Bank A and Bank B (kitListTargetsBankB picks which
+        // bank's selection this screen edits) — same list, same 200 slots,
+        // just a different currentKit/currentKitB write target so Bank B can
+        // jump straight to a kit number instead of only stepping with < / >.
         if (showKitList) {
             KitListScreen(
                 kits       = kits,
-                currentKit = currentKit,
+                currentKit = if (kitListTargetsBankB) currentKitB else currentKit,
                 onSelect   = { index ->
-                    currentKit  = index
+                    if (kitListTargetsBankB) currentKitB = index else currentKit = index
                     showKitList = false
                 },
 
@@ -2162,7 +2199,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onRename   = { index ->
                     // Direct/inline patch editing: rename right from the
                     // Patch List instead of needing Settings → Rename Kit.
-                    currentKit = index
+                    renameKitIndex = index
                     newKitName = kits[index].name
                     showRenameDialog = true
                 },
@@ -2181,10 +2218,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         if (showRenameDialog) {
 
             fun saveRenamedKit() {
-                if (newKitName.isNotBlank()) {
+                if (newKitName.isNotBlank() && renameKitIndex in kits.indices) {
 
                     val alreadyExists = kits.anyIndexed { index, kit ->
-                        index != currentKit &&
+                        index != renameKitIndex &&
                                 kit.name.equals(
                                     newKitName.trim(),
                                     ignoreCase = true
@@ -2200,7 +2237,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         return
                     }
 
-                    kits[currentKit] = kits[currentKit].copy(
+                    kits[renameKitIndex] = kits[renameKitIndex].copy(
                         name = newKitName.trim()
                     )
                     persistKits()
@@ -2469,6 +2506,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // the top of onPadHit()). Tapping outside the card dismisses it.
         if (editMenuPad != null) {
             val editPadIdx = editMenuPad!!
+            // Clamp against maxWidth instead of a fixed 200.dp — a fixed width
+            // isn't guaranteed to fit inside the available screen width on the
+            // smallest supported landscape phones.
+            val editMenuOptionWidth = (maxWidth * 0.55f).coerceIn(140.dp, 200.dp)
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -2494,7 +2535,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                     Box(
                         modifier = Modifier
-                            .width(200.dp)
+                            .width(editMenuOptionWidth)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF1A1A1A))
                             .clickable(remember { MutableInteractionSource() }, null) {
@@ -2513,7 +2554,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                     Box(
                         modifier = Modifier
-                            .width(200.dp)
+                            .width(editMenuOptionWidth)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF330000))
                             .clickable(remember { MutableInteractionSource() }, null) {
@@ -2531,7 +2572,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                     Box(
                         modifier = Modifier
-                            .width(200.dp)
+                            .width(editMenuOptionWidth)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF2A2A2A))
                             .clickable(remember { MutableInteractionSource() }, null) { editMenuPad = null }
@@ -2550,7 +2591,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // the round EDIT button again.
                     Box(
                         modifier = Modifier
-                            .width(200.dp)
+                            .width(editMenuOptionWidth)
                             .clip(RoundedCornerShape(10.dp))
                             .background(Color(0xFF3A2A00))
                             .clickable(remember { MutableInteractionSource() }, null) {

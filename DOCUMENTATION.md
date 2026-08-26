@@ -308,6 +308,21 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**Bank B kit isolation — real fix, supersedes the 2026-08-21 entry below (2026-08-26)**
+
+The 2026-08-21 "Bank B: two fixes" entry below only nudged Bank B off Bank A's *currently selected* kit when the two happened to collide — Bank A and Bank B still indexed into the exact same shared 200-slot `kits` list underneath, so manually navigating Bank B to any kit number Bank A wasn't actively sitting on (the common case — e.g. Bank A on kit 1, Bank B on kit 2) still opened the literal same `Kit` object Bank A's kit 2 uses; editing/importing/cropping a pad from Bank B still silently mutated the shared pre-built A-bank kit. Caught in a post-implementation audit, not by a new client report.
+
+Real fix: `kits` (`OctapadScreen.kt`) is now always kept at a minimum of 400 slots — 0..199 stays Bank A's original pool (25 factory kits + blanks, unchanged), 200..399 (`BANK_B_KIT_START`/`BANK_B_KIT_END`) is a second, permanently-blank pool reserved exclusively for Bank B. The two ranges never overlap, so the two banks can no longer land on the same `Kit` object under any navigation path:
+- `currentKitB` is clamped into `BANK_B_KIT_START..BANK_B_KIT_END` on load (migrates a pre-fix install's saved value, including the old default of 25, off Bank A's range); `PreferencesRepository.loadKitB()`'s fresh-install default moved from `25` to `200`.
+- Bank A's own `<`/`>` stepping and Patch List, the MIDI Program Change handler, and the MIDI Note `PATCH_NEXT`/`PATCH_PREV` actions are all capped at `BANK_A_KIT_CAPACITY - 1` (199) so normal Bank A navigation can't wander into Bank B's reserved range either. A kit an older install had organically grown past 200 via Import Patch/Load Kit (those two have never had a slot cap) is still reachable through the Patch List's search, just not via `+`/`-` stepping.
+- `deleteKit()` used to `removeAt(index)`, shifting every later kit down one slot — inside either reserved range that would have moved the *other* bank's kits to different absolute indices over time, eventually letting the two ranges drift back into each other. It now resets the slot to a blank placeholder **in place** for any index `<= BANK_B_KIT_END`, and only physically removes-and-shifts kits beyond that (organic overflow, which has no fixed-position guarantee to protect).
+- `copyKit()` gained an `intoBankB` flag: a Bank B copy writes into the first still-blank slot inside Bank B's own reserved pool (`firstFreeBankBSlot()`) instead of appending past the end, which would have landed outside the range `currentKitB` is confined to. Bank A copy is unchanged (appends at the end) — safe from ever colliding with Bank B's range since `kits` never shrinks below 400 (see the `deleteKit()` fix above).
+- `KitListScreen` (shared between both banks' patch-list overlay) gained a `visibleRange` param — Bank B's list now only shows and can only act on its own 200..399 range, never Bank A's; its "+ NEW KIT" action is likewise bank-aware (jumps to the next free Bank B slot instead of appending).
+
+Known residual gap, considered out of scope for this fix: custom (imported/recorded/cropped) pad *audio* is tracked in `AudioRepository` purely by raw kit index + pad index, with no separate cleanup when `deleteKit()` blanks a slot in place — a slot's stale `AudioRepository` entries stay associated with that index until something overwrites them (e.g. a later copy/import into that same slot), which pre-dates this fix and isn't specific to Bank B.
+
+Not verified on a physical device or an actual `./gradlew` build in this environment (no Android SDK/NDK available here — see the root `CLAUDE.md`'s standing note on that).
+
 **User bug-report batch: multi-hit volume, Crop rework, Delay drop, Choke simplify, Bank B isolation, MIDI Note-only actions (2026-08-21)**
 
 Eight issues reported directly by the client in Hindi, worked in the order given. Two required a scope decision from the client mid-session (asked via clarifying questions, not assumed) before implementing.

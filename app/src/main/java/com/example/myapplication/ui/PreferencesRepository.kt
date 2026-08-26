@@ -101,12 +101,17 @@ object PreferencesRepository {
         prefs()?.edit()?.putInt(KEY_KIT_B, index)?.apply()
     }
 
-    // NEW: defaults to a genuinely blank kit slot (index 25 = "EMPTY 026",
-    // the first of the pre-generated blank kits), not kit index 0 which is
-    // a real factory kit — Bank B should start empty until the user
-    // explicitly points it at a loaded kit, not silently inherit Bank A's
-    // default sounds.
-    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 25) ?: 25
+    // BUG FIX (B bank kit isolation): used to default to index 25 ("EMPTY
+    // 026"), which is still inside Bank A's own 0..199 kit pool — Bank A
+    // and Bank B indexed into the very same shared `kits` list back then,
+    // so this was never actually isolated from Bank A, just started on a
+    // kit that happened to look blank. `kits` now has a dedicated,
+    // permanently-blank 200-slot pool reserved for Bank B at indices
+    // 200..399 (see OctapadScreen.kt's BANK_B_KIT_START) — default there
+    // instead, and OctapadScreen.kt migrates any pre-existing saved value
+    // (including this old default of 25) that still points into Bank A's
+    // range back onto Bank B's own pool.
+    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 200) ?: 200
 
     fun saveKitC(index: Int) {
         prefs()?.edit()?.putInt(KEY_KIT_C, index)?.apply()

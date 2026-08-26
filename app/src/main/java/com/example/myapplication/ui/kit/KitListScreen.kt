@@ -46,6 +46,7 @@ import com.example.myapplication.ui.NavRed
 fun KitListScreen(
     kits: List<Kit>,
     currentKit: Int,
+    visibleRange: IntRange = kits.indices,
     onSelect: (Int) -> Unit,
     onAdd: () -> Unit,
     onDelete: (Int) -> Unit,
@@ -57,7 +58,9 @@ fun KitListScreen(
 ) {
     // Track which item is highlighted in this screen (starts at currentKit)
     var highlighted by remember { mutableStateOf(currentKit) }
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentKit)
+    val listState = rememberLazyListState(
+        initialFirstVisibleItemIndex = (currentKit - visibleRange.first).coerceAtLeast(0)
+    )
 
     // NEW: search — with up to 200 kits, finding one by scrolling is slow.
     // Filters by name (case-insensitive substring), but keeps each row's
@@ -65,9 +68,10 @@ fun KitListScreen(
     // all operate on that real index, not a position within the filtered
     // results, so renaming/selecting/exporting still hits the right kit.
     var searchQuery by remember { mutableStateOf("") }
-    val filteredKits = remember(kits, searchQuery) {
-        if (searchQuery.isBlank()) kits.withIndex().toList()
-        else kits.withIndex().filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }
+    val filteredKits = remember(kits, searchQuery, visibleRange) {
+        val inRange = kits.withIndex().filter { it.index in visibleRange }
+        if (searchQuery.isBlank()) inRange
+        else inRange.filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }
     }
 
     // Full screen dark overlay
@@ -101,7 +105,7 @@ fun KitListScreen(
                     letterSpacing = 2.sp
                 )
                 Text(
-                    "${kits.size} kits",
+                    "${filteredKits.size} kits",
                     color    = Color(0xFF666666),
                     fontSize = 11.sp
                 )
@@ -225,8 +229,8 @@ fun KitListScreen(
                     onAdd()
                 }
 
-                // "⧉" Copy highlighted kit (disabled once at the 200-kit cap)
-                val canCopy = kits.size < 200
+                // "⧉" Copy highlighted kit
+                val canCopy = true
                 ActionBtn(
                     label    = "⧉  COPY",
                     bgColor  = if (canCopy) Color(0xFF002233) else Color(0xFF1A1A1A),

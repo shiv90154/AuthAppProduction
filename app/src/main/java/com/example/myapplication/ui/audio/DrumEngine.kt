@@ -5,6 +5,7 @@ import android.net.Uri
 import com.example.myapplication.NativeBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 /**
@@ -19,6 +20,21 @@ object DrumEngine {
     // so we don't redundantly re-decode+reload on every recomposition.
     // 24 slots: 0-7 Bank A, 8-15 Bank B, 16-23 Bank C.
     private val loadedKey = arrayOfNulls<String>(24)
+
+    // BUG FIX: each loadPad() call used to launch its own independent
+    // coroutine with no ordering against a previous still-in-flight call for
+    // the SAME nativeSlot (e.g. stepping through kits faster than a decode
+    // can finish). Decode time depends on file size/format, not call order,
+    // so whichever coroutine happened to finish LAST won the native buffer —
+    // not necessarily the most recently requested kit. A pad could end up
+    // silently playing a stale/previous kit's sample until the next reload.
+    // `pendingKey` records the most-recently-REQUESTED key per slot; a
+    // decode that finishes only gets applied if it's still the latest
+    // request for that slot. `loadJobs` additionally cancels a superseded
+    // in-flight decode outright, so it doesn't keep burning a background
+    // thread on a result nobody will use.
+    private val pendingKey = arrayOfNulls<String>(24)
+    private val loadJobs = arrayOfNulls<Job>(24)
 
     // Cached once the stream is open — never assume a fixed rate (e.g.
     // 48000) anywhere ms-based timing gets converted to frames; the engine
@@ -74,12 +90,20 @@ object DrumEngine {
 
         if (loadedKey[nativeSlot] == key) return // already loaded, skip re-decode
 
-        CoroutineScope(Dispatchers.Default).launch {
+        pendingKey[nativeSlot] = key
+        loadJobs[nativeSlot]?.cancel()
+        loadJobs[nativeSlot] = CoroutineScope(Dispatchers.Default).launch {
             val result = if (assigned != null) {
                 PcmDecoder.decode(context, assigned.uri)
             } else {
                 PcmDecoder.decodeRawResource(context, defaultResId)
             }
+
+            // A newer loadPad() call for this same slot superseded this one
+            // while decoding was in flight — drop this result rather than
+            // clobbering whatever the newer request already loaded/is
+            // loading.
+            if (pendingKey[nativeSlot] != key) return@launch
 
             if (result != null) {
                 val pcm = if (reversed) reversePcm(result.pcm, result.channels) else result.pcm

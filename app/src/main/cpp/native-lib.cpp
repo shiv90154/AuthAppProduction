@@ -255,42 +255,79 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved)
     return JNI_VERSION_1_6;
 }
 
+// BUG FIX: every sendXToKotlin() below used to call AttachCurrentThread()
+// unconditionally on every invocation and never DetachCurrentThread() —
+// these run on the MIDI-receive thread (an Android binder/thread-pool
+// thread, not the audio callback thread), so repeatedly attaching without
+// ever detaching is a real JNI leak: if that native thread is ever
+// recycled/destroyed by the framework's thread pool while still attached,
+// ART logs (and on some configurations can abort on) "native thread exited
+// without calling DetachCurrentThread". GetEnvForCurrentThread() only
+// attaches if the calling thread isn't already attached (checked via
+// GetEnv()), and reports that back so the caller only detaches a thread it
+// itself attached — never a thread that was already attached before this
+// call (e.g. one the JVM/framework manages the lifecycle of itself).
+static JNIEnv* GetEnvForCurrentThread(bool* didAttach)
+{
+    *didAttach = false;
+    if (!g_vm) return nullptr;
+    JNIEnv* env = nullptr;
+    jint status = g_vm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (status == JNI_OK) return env;
+    if (status == JNI_EDETACHED) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return nullptr;
+        *didAttach = true;
+        return env;
+    }
+    return nullptr; // JNI_EVERSION or other failure
+}
+
 void sendControlChangeToKotlin(int ccNumber, int ccValue)
 {
     if (!g_vm || !g_bridgeClass || !g_ccCallback) return;
-    JNIEnv* env = nullptr;
-    g_vm->AttachCurrentThread(&env, nullptr);
+    bool didAttach = false;
+    JNIEnv* env = GetEnvForCurrentThread(&didAttach);
+    if (!env) return;
     env->CallStaticVoidMethod(g_bridgeClass, g_ccCallback, (jint)ccNumber, (jint)ccValue);
+    if (didAttach) g_vm->DetachCurrentThread();
 }
 
 void sendPadHitToKotlin(int padIndex, float velocity)
 {
     if (!g_vm || !g_bridgeClass || !g_padHitCallback) return;
-    JNIEnv* env = nullptr;
-    g_vm->AttachCurrentThread(&env, nullptr);
+    bool didAttach = false;
+    JNIEnv* env = GetEnvForCurrentThread(&didAttach);
+    if (!env) return;
     env->CallStaticVoidMethod(g_bridgeClass, g_padHitCallback, (jint)padIndex, (jfloat)velocity);
+    if (didAttach) g_vm->DetachCurrentThread();
 }
 
 void sendLearnAssignedToKotlin(int padNumber, int note)
 {
     if (!g_vm || !g_bridgeClass || !g_learnAssignedCallback) return;
-    JNIEnv* env = nullptr;
-    g_vm->AttachCurrentThread(&env, nullptr);
+    bool didAttach = false;
+    JNIEnv* env = GetEnvForCurrentThread(&didAttach);
+    if (!env) return;
     env->CallStaticVoidMethod(g_bridgeClass, g_learnAssignedCallback, (jint)padNumber, (jint)note);
+    if (didAttach) g_vm->DetachCurrentThread();
 }
 
 void sendProgramChangeToKotlin(int program)
 {
     if (!g_vm || !g_bridgeClass || !g_programChangeCallback) return;
-    JNIEnv* env = nullptr;
-    g_vm->AttachCurrentThread(&env, nullptr);
+    bool didAttach = false;
+    JNIEnv* env = GetEnvForCurrentThread(&didAttach);
+    if (!env) return;
     env->CallStaticVoidMethod(g_bridgeClass, g_programChangeCallback, (jint)program);
+    if (didAttach) g_vm->DetachCurrentThread();
 }
 
 void sendRawNoteOnToKotlin(int note, int velocity)
 {
     if (!g_vm || !g_bridgeClass || !g_rawNoteCallback) return;
-    JNIEnv* env = nullptr;
-    g_vm->AttachCurrentThread(&env, nullptr);
+    bool didAttach = false;
+    JNIEnv* env = GetEnvForCurrentThread(&didAttach);
+    if (!env) return;
     env->CallStaticVoidMethod(g_bridgeClass, g_rawNoteCallback, (jint)note, (jint)velocity);
+    if (didAttach) g_vm->DetachCurrentThread();
 }

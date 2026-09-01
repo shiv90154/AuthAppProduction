@@ -32,11 +32,14 @@ object NativeBridge {
      * cut, for the per-pad LENGTH trim control (1f = full sample, default).
      * pan = -1f (full left)..1f (full right), 0f = center (default).
      * gain = 0f..2f multiplicative trim on top of volume, 1f = unity (default).
+     * startFraction = 0f..0.95f — how far into the sample playback starts, for
+     * the non-destructive per-pad CROP start handle (0f = from the beginning,
+     * default). Playback plays the window [startFraction, lengthFraction].
      */
     external fun triggerPad(
         padIndex: Int, volume: Float, pitch: Float,
         stopExisting: Boolean = true, lengthFraction: Float = 1f,
-        pan: Float = 0f, gain: Float = 1f
+        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f
     )
 
     external fun setPadVolumeNative(padIndex: Int, volume: Float)

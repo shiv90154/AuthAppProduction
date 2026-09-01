@@ -89,7 +89,18 @@ fun WaveformEditorScreen(
     // NEW: wipes whatever sound (custom or factory) this pad has, leaving
     // it silent — same "add + clear sound, both right here in Crop" flow
     // requested instead of having to dig through other screens to unassign.
-    onClearSound: () -> Unit = {}
+    onClearSound: () -> Unit = {},
+    // NEW: non-destructive CROP. The pad remembers a play-window
+    // [start, end] as fractions of the full sample; nothing is written to
+    // disk and the underlying file keeps its full length. These seed the
+    // on-screen handles from whatever crop the pad already had.
+    initialCropStartPct: Float = 0f,
+    initialLengthPct: Float = 1f,
+    // Called when an edit commits. destructive=false → a pure crop: only
+    // (startPct, endPct) changed, no file rewrite. destructive=true → a
+    // DELETE-region cut was applied and the file itself was rewritten to
+    // the trimmed clip, so the caller should reset its crop window to full.
+    onCommitCrop: (startPct: Float, endPct: Float, destructive: Boolean) -> Unit = { _, _, _ -> }
 ) {
     val context = LocalContext.current
 
@@ -173,8 +184,12 @@ fun WaveformEditorScreen(
                 if (result != null) {
                     pcmResult = result
                     amplitudes = computeAmplitudes(result, bars = 512)
-                    cropStartMs = 0L
-                    cropEndMs = (result.pcm.size.toLong() / result.channels * 1000L / result.sampleRate)
+                    val fullMs = (result.pcm.size.toLong() / result.channels * 1000L / result.sampleRate)
+                    // Seed the handles from the pad's existing non-destructive
+                    // crop window instead of always the full clip.
+                    cropStartMs = (fullMs * initialCropStartPct.coerceIn(0f, 0.95f)).toLong()
+                    cropEndMs = (fullMs * initialLengthPct.coerceIn(0.05f, 1f)).toLong()
+                        .coerceIn(cropStartMs + 1L, fullMs)
                 } else {
                     errorMsg = "Failed to decode this pad's audio."
                 }
@@ -252,7 +267,27 @@ fun WaveformEditorScreen(
     LaunchedEffect(cropStartMs, cropEndMs, deleteStartMs, deleteEndMs, hasUserEdited) {
         if (hasUserEdited) {
             delay(1000L)
-            applyPending()
+            val hasDelete = deleteStartMs >= 0 && deleteEndMs > deleteStartMs
+            if (hasDelete) {
+                // DELETE-region cut can't be expressed as a single play
+                // window — it still rewrites the file. After it commits, the
+                // pad's non-destructive crop window resets to full (the new
+                // file is already the trimmed clip).
+                applyPending()
+                onCommitCrop(0f, 1f, true)
+            } else {
+                // Pure CROP: nothing is written. The pad just remembers the
+                // [start, end] window and plays only that slice of the
+                // (still full-length) sample.
+                val d = durationMs.coerceAtLeast(1L)
+                onCommitCrop(
+                    (cropStartMs.toFloat() / d).coerceIn(0f, 0.95f),
+                    (cropEndMs.toFloat() / d).coerceIn(0.05f, 1f),
+                    false
+                )
+                saveMsg = "Saved"
+                hasUserEdited = false
+            }
         }
     }
 
@@ -554,7 +589,11 @@ fun WaveformEditorScreen(
                                         zoom = 1f
                                         scrollFrac = 0f
                                         saveMsg = null
-                                        hasUserEdited = false
+                                        // Commit the cleared crop so RESET
+                                        // actually removes a previously saved
+                                        // play-window, not just the on-screen
+                                        // selection.
+                                        hasUserEdited = true
                                     }
                                 }
                                 .padding(vertical = 12.dp),

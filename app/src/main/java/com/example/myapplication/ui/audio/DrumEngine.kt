@@ -139,9 +139,9 @@ object DrumEngine {
     fun trigger(
         padIndex: Int, volume: Float, pitch: Float,
         stopExisting: Boolean = true, lengthFraction: Float = 1f,
-        pan: Float = 0f, gain: Float = 1f
+        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f
     ) {
-        NativeBridge.triggerPad(padIndex, volume, pitch, stopExisting, lengthFraction, pan, gain)
+        NativeBridge.triggerPad(padIndex, volume, pitch, stopExisting, lengthFraction, pan, gain, startFraction)
     }
 
     fun invalidatePad(padIndex: Int) {

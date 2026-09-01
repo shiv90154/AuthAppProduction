@@ -81,6 +81,12 @@ data class Kit(
     // NEW: fraction (0.05..1.0) of each pad's sample that actually plays —
     // the "LENGTH" trim control.
     val padLengthPct: MutableList<Float> = mutableStateListOf(1f,1f,1f,1f,1f,1f,1f,1f),
+    // NEW: non-destructive CROP start handle — fraction (0f..0.95f) of the
+    // sample to skip before playback begins. Pairs with padLengthPct (end
+    // trim): the pad plays the window [padCropStartPct, padLengthPct] of its
+    // sample without ever rewriting the underlying file, so the full-length
+    // audio is preserved and the crop stays re-editable.
+    val padCropStartPct: MutableList<Float> = mutableStateListOf(0f,0f,0f,0f,0f,0f,0f,0f),
     // NEW: per-pad Reverse toggle + playback mode ("ONESHOT" | "LOOP" | "MIX")
     val padReverse:   MutableList<Boolean> = mutableStateListOf(false,false,false,false,false,false,false,false),
     val padPlayMode:  MutableList<String>  = mutableStateListOf("ONESHOT","ONESHOT","ONESHOT","ONESHOT","ONESHOT","ONESHOT","ONESHOT","ONESHOT"),
@@ -322,6 +328,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         padEqHigh  = mutableStateListOf<Float>().apply { addAll(entry.padEqHigh) },
                         padDelayMs = mutableStateListOf<Int>().apply   { addAll(entry.padDelayMs) },
                         padLengthPct = mutableStateListOf<Float>().apply { addAll(entry.padLengthPct) },
+                        padCropStartPct = mutableStateListOf<Float>().apply { addAll(entry.padCropStartPct) },
                         padReverse = mutableStateListOf<Boolean>().apply { addAll(entry.padReverse) },
                         padPlayMode = mutableStateListOf<String>().apply { addAll(entry.padPlayMode) },
                         padPan  = mutableStateListOf<Float>().apply { addAll(entry.padPan) },
@@ -479,6 +486,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         if (currentKit !in kits.indices) {
             currentKit = 0
         }
+        // BUG FIX: an install affected by the old "new kit appended past slot
+        // 400" bug can come back up with currentKit pointing at an overflow
+        // index (>= BANK_A_KIT_CAPACITY) that Bank A's `>` nav and Patch List
+        // can't reach — pull it back into Bank A's own 0..199 pool.
+        if (currentKit >= BANK_A_KIT_CAPACITY) {
+            currentKit = BANK_A_KIT_CAPACITY - 1
+        }
     }
 
     // NEW: saves current kit list (name + factory source) so it survives restart
@@ -498,6 +512,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     padEqHigh = it.padEqHigh.toList(),
                     padDelayMs = it.padDelayMs.toList(),
                     padLengthPct = it.padLengthPct.toList(),
+                    padCropStartPct = it.padCropStartPct.toList(),
                     padReverse = it.padReverse.toList(),
                     padPlayMode = it.padPlayMode.toList(),
                     padPan  = it.padPan.toList(),
@@ -744,13 +759,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // hear — is handed off to a coroutine.
         val assigned = AudioRepository.audioForPad(bankKitIdx(), index)
         val uriToShow: Uri?
-        val durationToShow: Long
+        val rawDurationToShow: Long
         if (currentStreamId != 0) {
             soundPool.stop(currentStreamId)
         }
         if (assigned != null) {
             uriToShow      = assigned.uri
-            durationToShow = assigned.durationMs
+            rawDurationToShow = assigned.durationMs
         } else {
             uriToShow      = null
             // BUG FIX: this used to always guess DEFAULT_PAD_DURATION_MS
@@ -761,9 +776,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             // real decoded duration (cached by DrumEngine.loadPad the first
             // time this pad's sample was loaded) when available.
             val factoryResId = kits[bankKitIdx()].sounds.getOrElse(index) { -1 }
-            durationToShow = com.example.myapplication.ui.audio.PadDurationCache.get(factoryResId)
+            rawDurationToShow = com.example.myapplication.ui.audio.PadDurationCache.get(factoryResId)
                 ?: DEFAULT_PAD_DURATION_MS
         }
+
+        // Non-destructive CROP: the pad plays only the window
+        // [padCropStartPct, padLengthPct] of its sample (see the native
+        // startFraction plumbing). The LCD timer and every LOOP-mode
+        // retrigger interval below should track that sliced length, not the
+        // full untrimmed file — otherwise a cropped looping pad would
+        // retrigger with a long silent tail.
+        val cropSpanFraction = ((kits[bankKitIdx()].padLengthPct.getOrElse(index) { 1f }
+                - kits[bankKitIdx()].padCropStartPct.getOrElse(index) { 0f })).coerceIn(0.02f, 1f)
+        val durationToShow: Long = (rawDurationToShow * cropSpanFraction).toLong().coerceAtLeast(1L)
 
         // Stop any current voice for this pad + cancel its loop token so any
         // in-flight coroutine for a previous hit exits on its next check.
@@ -869,7 +894,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         stopExisting = !allowOverlap,
                         lengthFraction = kits[kitForSlot].padLengthPct.getOrElse(index) { 1f },
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
-                        gain = kits[kitForSlot].padGain.getOrElse(index) { 1f }
+                        gain = kits[kitForSlot].padGain.getOrElse(index) { 1f },
+                        startFraction = kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f }
                     )
                 }
             }
@@ -928,9 +954,18 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // rate-like SPEED multiplier, same idea as the beat-grid
                     // scaling above, just applied to LOOP mode's own interval.
                     val loopModeIntervalMs = (durationToShow / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
+                    // BUG FIX: the global Loop toggle's retrigger window used
+                    // to be maxOf(beatIntervalMs, durationToShow) — so once
+                    // SPEED made a beat shorter than the sample, raising SPEED
+                    // further did nothing at all ("loop mode me speed kaam
+                    // nahi kar raha"). beatIntervalMs is already BPM/SPEED
+                    // scaled; use it directly (floored at 50ms) so SPEED
+                    // always tightens/loosens the loop, cutting the sample
+                    // short when the beat is shorter than it — which is the
+                    // whole point of a loop speed control.
                     val waitWindowMs = when {
                         currentMode == "LOOP" -> loopModeIntervalMs
-                        effectiveLoop()        -> maxOf(beatIntervalMs, durationToShow)
+                        effectiveLoop()        -> beatIntervalMs
                         else                    -> durationToShow
                     }
 
@@ -1428,6 +1463,20 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             kits[it].factoryKitNumber == -1 && kits[it].name.startsWith("EMPTY B ")
         }
 
+    // BUG FIX: `kits` is permanently padded to >= 400 entries (Bank A pool
+    // 0..199, Bank B pool 200..399), so every `kits.add(...)` for a new
+    // Bank A kit landed at index 400+ — outside Bank A's Patch List range
+    // (0..199) and outside the `onKitNext` cap (BANK_A_KIT_CAPACITY-1), so
+    // the new/loaded kit was invisible in the list and `>` (next patch)
+    // stopped working (only `<` did, walking back into Bank B's pool). Every
+    // Bank A "create kit" path (NEW KIT button, Patch List + NEW KIT, Load
+    // Kit From Folder, Import Patch) now writes into the first still-blank
+    // slot inside Bank A's own 0..199 pool instead of appending past it.
+    fun firstFreeBankASlot(): Int? =
+        (0 until BANK_A_KIT_CAPACITY).firstOrNull {
+            kits[it].factoryKitNumber == -1 && kits[it].name.startsWith("EMPTY ")
+        }
+
     // NEW: duplicates kits[index] (all volumes/pitches/EQ/choke groups/custom
     // audio). `intoBankB` = true writes the copy into a free slot inside
     // Bank B's own reserved pool (never appended past it — appending would
@@ -1447,6 +1496,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             padEqHigh  = mutableStateListOf<Float>().apply { addAll(source.padEqHigh) },
             padDelayMs = mutableStateListOf<Int>().apply { addAll(source.padDelayMs) },
             padLengthPct = mutableStateListOf<Float>().apply { addAll(source.padLengthPct) },
+            padCropStartPct = mutableStateListOf<Float>().apply { addAll(source.padCropStartPct) },
             padReverse = mutableStateListOf<Boolean>().apply { addAll(source.padReverse) },
             padPlayMode = mutableStateListOf<String>().apply { addAll(source.padPlayMode) },
             padPan  = mutableStateListOf<Float>().apply { addAll(source.padPan) },
@@ -1577,6 +1627,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         val tempLengthPct = kits[kitIdx].padLengthPct[s]
         kits[kitIdx].padLengthPct[s] = kits[kitIdx].padLengthPct[t]
         kits[kitIdx].padLengthPct[t] = tempLengthPct
+
+        val tempCropStartPct = kits[kitIdx].padCropStartPct[s]
+        kits[kitIdx].padCropStartPct[s] = kits[kitIdx].padCropStartPct[t]
+        kits[kitIdx].padCropStartPct[t] = tempCropStartPct
 
         val tempReverse = kits[kitIdx].padReverse[s]
         kits[kitIdx].padReverse[s] = kits[kitIdx].padReverse[t]
@@ -2145,20 +2199,23 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                     // ── NEW: user khud jo naya kit add karega uske pads
                     // khaali (-1 = no sound) rahenge, default pad1-8 sound nahi bharega ──
-                    if (kits.size < 200) {
+                    val freeSlot = firstFreeBankASlot()
+                    if (freeSlot != null) {
 
-                        kits.add(
-                            Kit(
-                                generateNextKitName(),
-                                sounds = mutableStateListOf(
-                                    -1, -1, -1, -1, -1, -1, -1, -1
-                                ),
-                                factoryKitNumber = -1
-                            )
+                        kits[freeSlot] = Kit(
+                            generateNextKitName(),
+                            sounds = mutableStateListOf(
+                                -1, -1, -1, -1, -1, -1, -1, -1
+                            ),
+                            factoryKitNumber = -1
                         )
 
-                        currentKit = kits.lastIndex
+                        currentKit = freeSlot
                         persistKits()   // NEW
+                    } else {
+                        android.widget.Toast.makeText(
+                            context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                        ).show()
                     }
                 },
                 onKitDelete   = { deleteKit(currentKit) },
@@ -2281,18 +2338,22 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         }
                     } else {
                         // ── NEW: yaha se add kiya gaya kit bhi khaali (-1) pads ke saath banega ──
-                        kits.add(
-                            Kit(
+                        val freeSlot = firstFreeBankASlot()
+                        if (freeSlot != null) {
+                            kits[freeSlot] = Kit(
                                 generateNextKitName(),
                                 sounds = mutableStateListOf(
                                     -1, -1, -1, -1, -1, -1, -1, -1
                                 ),
                                 factoryKitNumber = -1
                             )
-                        )
-
-                        currentKit = kits.lastIndex
-                        persistKits()   // NEW
+                            currentKit = freeSlot
+                            persistKits()   // NEW
+                        } else {
+                            android.widget.Toast.makeText(
+                                context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
                     }
                 },
 
@@ -2464,6 +2525,22 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     onClearSound = {
                         clearPadSound(selectedPad)
                         topPanel = ""
+                    },
+                    initialCropStartPct = kits[editKitIdx].padCropStartPct.getOrElse(selectedPad) { 0f },
+                    initialLengthPct = kits[editKitIdx].padLengthPct.getOrElse(selectedPad) { 1f },
+                    onCommitCrop = { startPct, endPct, destructive ->
+                        if (editKitIdx in kits.indices) {
+                            if (destructive) {
+                                // File was rewritten to the trimmed clip —
+                                // the non-destructive window goes back to full.
+                                kits[editKitIdx].padCropStartPct[selectedPad] = 0f
+                                kits[editKitIdx].padLengthPct[selectedPad] = 1f
+                            } else {
+                                kits[editKitIdx].padCropStartPct[selectedPad] = startPct.coerceIn(0f, 0.95f)
+                                kits[editKitIdx].padLengthPct[selectedPad] = endPct.coerceIn(0.05f, 1f)
+                            }
+                            persistKits()
+                        }
                     }
                 )
             }
@@ -2515,6 +2592,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             padEqHigh = mutableStateListOf<Float>().apply { addAll(entry.padEqHigh) },
                             padDelayMs = mutableStateListOf<Int>().apply { addAll(entry.padDelayMs) },
                             padLengthPct = mutableStateListOf<Float>().apply { addAll(entry.padLengthPct) },
+                            padCropStartPct = mutableStateListOf<Float>().apply { addAll(entry.padCropStartPct) },
                             padReverse = mutableStateListOf<Boolean>().apply { addAll(entry.padReverse) },
                             padPlayMode = mutableStateListOf<String>().apply { addAll(entry.padPlayMode) },
                             padPan = mutableStateListOf<Float>().apply { addAll(entry.padPan) },
@@ -2525,26 +2603,32 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             chokeGroups = entry.chokeGroups.map { levels -> mutableStateListOf<Int>().apply { addAll(levels) } },
                             activeChokeLevelState = mutableStateOf(entry.activeChokeLevel)
                         )
-                        kits.add(newKit)
-                        val newKitIndex = kits.lastIndex
-                        currentKit = newKitIndex
+                        val newKitIndex = firstFreeBankASlot()
+                        if (newKitIndex == null) {
+                            android.widget.Toast.makeText(
+                                context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            kits[newKitIndex] = newKit
+                            currentKit = newKitIndex
 
-                        importedAudios.forEach { ia ->
-                            AudioRepository.add(
-                                com.example.myapplication.ui.audio.AudioItem(
-                                    id = System.currentTimeMillis() + ia.padIndex,
-                                    name = ia.name,
-                                    uri = Uri.fromFile(ia.file),
-                                    durationMs = ia.durationMs
-                                ).also {
-                                    it.assignedPad = ia.padIndex
-                                    it.assignedKit = newKitIndex
-                                }
-                            )
-                            DrumEngine.invalidatePad(ia.padIndex)
+                            importedAudios.forEach { ia ->
+                                AudioRepository.add(
+                                    com.example.myapplication.ui.audio.AudioItem(
+                                        id = System.currentTimeMillis() + ia.padIndex,
+                                        name = ia.name,
+                                        uri = Uri.fromFile(ia.file),
+                                        durationMs = ia.durationMs
+                                    ).also {
+                                        it.assignedPad = ia.padIndex
+                                        it.assignedKit = newKitIndex
+                                    }
+                                )
+                                DrumEngine.invalidatePad(ia.padIndex)
+                            }
+
+                            persistKits()
                         }
-
-                        persistKits()
                         topPanel = ""
                     }
                 )
@@ -2554,14 +2638,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 LoadKitScreen(
                     currentKitCount = kits.size,
                     onKitLoaded = { name, files ->
+                        val newKitIndex = firstFreeBankASlot()
+                      if (newKitIndex == null) {
+                        android.widget.Toast.makeText(
+                            context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                        topPanel = ""
+                      } else {
                         // Create new empty kit
-                        val newKit = Kit(
+                        kits[newKitIndex] = Kit(
                             name   = name,
                             sounds = mutableStateListOf(-1,-1,-1,-1,-1,-1,-1,-1),
                             factoryKitNumber = -1
                         )
-                        kits.add(newKit)
-                        val newKitIndex = kits.lastIndex
                         currentKit = newKitIndex
 
                         // Assign each file to its pad slot
@@ -2591,6 +2680,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                         persistKits()
                         topPanel = ""
+                      }
                     },
                     onClose = { topPanel = "" }
                 )

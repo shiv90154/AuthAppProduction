@@ -127,7 +127,7 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
 // ─────────────────────────────────────────────────────────────────────────────
 
 void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopExisting,
-                              float lengthFraction, float pan, float gain) {
+                              float lengthFraction, float pan, float gain, float startFraction) {
     if (padIndex < 0 || padIndex >= kMaxPads) return;
 
     // A pitch of exactly (or near) 0 makes onAudioReady's playback rate 0,
@@ -238,12 +238,19 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
 
                 Voice &v = *claimed;
                 v.padIndex = padIndex;
-                v.position = 0.0;
+                // Non-destructive CROP start handle: begin playback
+                // `startFraction` of the way into the sample instead of at
+                // frame 0. Clamped to [0, 0.95] and kept strictly below the
+                // end trim so there's always at least a sliver to play.
+                float clampedStart = startFraction < 0.0f ? 0.0f : (startFraction > 0.95f ? 0.95f : startFraction);
+                float clampedLen = lengthFraction < 0.05f ? 0.05f : (lengthFraction > 1.0f ? 1.0f : lengthFraction);
+                if (clampedStart >= clampedLen) clampedStart = 0.0f;
+                int64_t totalFrames = static_cast<int64_t>(buffers_[padIndex].samples.size() / 2);
+                v.position = static_cast<double>(clampedStart) * static_cast<double>(totalFrames);
+                v.startFraction.store(clampedStart, std::memory_order_relaxed);
                 v.volume.store(volume, std::memory_order_relaxed);
                 v.pitch.store(pitch, std::memory_order_relaxed);
-                v.lengthFraction.store(
-                    lengthFraction < 0.05f ? 0.05f : (lengthFraction > 1.0f ? 1.0f : lengthFraction),
-                    std::memory_order_relaxed);
+                v.lengthFraction.store(clampedLen, std::memory_order_relaxed);
                 v.pan.store(pan, std::memory_order_relaxed);
                 v.gain.store(gain, std::memory_order_relaxed);
                 v.releaseGain = 1.0f;
@@ -351,12 +358,17 @@ void AudioEngine::stopPad(int padIndex) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void AudioEngine::setDelayEnabled(bool enabled) {
+    // BUG FIX: this used to clear delayTaps_ whenever `enabled` went false.
+    // But Kotlin's syncDelayForHit() calls setDelayEnabled(padDelayEnabled)
+    // synchronously before EVERY pad hit — so hitting any delay-off pad (or
+    // even just selecting one, via the reactive LaunchedEffect) wiped the
+    // still-pending echo of a delay-on pad that was hit a moment earlier.
+    // That's exactly "delay lagne ke baad koi bhi pad hit karo to delay hat
+    // jata hai". `delayEnabled_` already gates whether NEW taps get
+    // scheduled (see triggerPad); already-queued taps must be allowed to
+    // drain naturally. onAudioReady::fireDelayTaps() runs unconditionally
+    // and is a cheap no-op once the queue empties.
     delayEnabled_.store(enabled, std::memory_order_relaxed);
-    if (!enabled) {
-        // Flush all pending taps immediately
-        std::lock_guard<std::mutex> lock(delayMutex_);
-        delayTaps_.clear();
-    }
     LOGD("Delay enabled=%d", (int)enabled);
 }
 

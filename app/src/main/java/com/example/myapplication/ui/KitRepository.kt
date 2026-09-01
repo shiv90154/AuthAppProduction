@@ -26,6 +26,9 @@ object KitRepository {
         val padEqHigh:  List<Float> = List(8) { 1f },
         val padDelayMs: List<Int>   = List(8) { 300 },
         val padLengthPct: List<Float> = List(8) { 1f },
+        // NEW: non-destructive CROP start handle (fraction 0f..0.95f skipped
+        // before playback). Older saved kits without this key default to 0f.
+        val padCropStartPct: List<Float> = List(8) { 0f },
         val padReverse: List<Boolean> = List(8) { false },
         val padPlayMode: List<String> = List(8) { "ONESHOT" },
         // NEW: per-pad Pan (-1f..1f, 0f = center) and Gain (0f..2f, 1f = unity)
@@ -87,6 +90,7 @@ object KitRepository {
         putFloatArray("padEqHigh",  entry.padEqHigh)
         putIntArray  ("padDelayMs", entry.padDelayMs)
         putFloatArray("padLengthPct", entry.padLengthPct)
+        putFloatArray("padCropStartPct", entry.padCropStartPct)
         putBoolArray ("padReverse", entry.padReverse)
         putStringArray("padPlayMode", entry.padPlayMode)
         putFloatArray("padPan",  entry.padPan)
@@ -158,6 +162,7 @@ object KitRepository {
             padEqHigh  = loadFloatArray("padEqHigh",  1f),
             padDelayMs = loadIntArray("padDelayMs", 300),
             padLengthPct = loadFloatArray("padLengthPct", 1f),
+            padCropStartPct = loadFloatArray("padCropStartPct", 0f),
             padReverse = loadBoolArray("padReverse", false),
             padPlayMode = loadStringArray("padPlayMode", "ONESHOT"),
             padPan  = loadFloatArray("padPan",  0f),

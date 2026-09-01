@@ -308,6 +308,17 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**User bug-report batch: kit-load slots, non-destructive crop, loop SPEED, delay drop (2026-09-01)**
+
+Five issues reported by the client in Hindi:
+
+- **New kit / Patch List "+ NEW KIT" / Load Kit From Folder / Import Patch all broken** — one root cause. `kits` is permanently padded to ≥400 entries (Bank A pool 0..199, Bank B pool 200..399), but every "create a Bank A kit" path did `kits.add(...)`, landing the new kit at index 400+ — outside Bank A's Patch List range (0..199) *and* outside `onKitNext`'s `BANK_A_KIT_CAPACITY-1` cap. So the NEW KIT button did nothing (`if (kits.size < 200)` is never true), and a loaded/imported kit was invisible in the list ("patch save nahi hota") with `>` dead (only `<` worked, walking into Bank B's pool). Added `firstFreeBankASlot()` and routed all four paths into the first blank slot inside Bank A's own 0..199 pool. Startup clamp pulls a stuck `currentKit >= 200` back into range for already-affected installs.
+- **Crop is now non-destructive.** `WaveformEditorScreen`'s CROP mode no longer rewrites the sample file — it stores a play-window as `Kit.padCropStartPct` (new) + `padLengthPct` (existing end-trim) and the native engine plays only `[startFraction, lengthFraction]` of the still-full-length buffer. New native `Voice::startFraction` + `triggerPad(..., startFraction)` param threaded through JNI/`NativeBridge`/`DrumEngine`/`onPadHit`/persistence/swap/copy/import-patch. DELETE-region cuts still rewrite the file (can't be a single window) and reset the pad's crop window to full on commit. The editor seeds its handles from the pad's saved window; RESET commits the cleared window. `onPadHit` scales the LCD timer + LOOP retrigger interval by the crop span so a cropped looping pad doesn't retrigger with a silent tail.
+- **LOOP-mode SPEED had no effect past a point.** The global Loop toggle's retrigger window was `maxOf(beatIntervalMs, durationToShow)` — once SPEED made a beat shorter than the sample, raising it further did nothing. Now uses `beatIntervalMs` (already BPM×SPEED scaled, floored at 50ms) directly, so SPEED always tightens/loosens the loop, truncating the sample when the beat is shorter.
+- **Delay dropped when any other pad was hit.** `AudioEngine::setDelayEnabled(false)` cleared the pending-echo queue — and Kotlin calls it synchronously before *every* pad hit via `syncDelayForHit()`, so hitting (or even just selecting) any delay-off pad wiped a delay-on pad's still-pending echo. Removed the queue-clear; `delayEnabled_` still gates whether *new* taps schedule, already-queued taps drain naturally.
+
+Built clean (`:app:assembleDebug`, all 4 ABIs). Not device-tested.
+
 **Full-project audit: kit-load race + JNI thread-attach leak (2026-08-31)**
 
 Client asked for a general "check the whole project for bugs" pass (audio crackle in particular). A read-only audit found the documented crackle/race fixes (voice `active`/`ready` ordering, headroom/soft-clip, attack/release fades, `bufferMutex_`/`delayMutex_` ordering, choke `clear()` data loss) all still genuinely hold — no regression there. Two previously-unreported bugs did turn up and were fixed:

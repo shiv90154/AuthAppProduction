@@ -120,9 +120,10 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_com_example_myapplication_NativeBridge_triggerPad(
         JNIEnv *env, jobject thiz, jint padIndex, jfloat volume, jfloat pitch,
-        jboolean stopExisting, jfloat lengthFraction, jfloat pan, jfloat gain)
+        jboolean stopExisting, jfloat lengthFraction, jfloat pan, jfloat gain,
+        jfloat startFraction)
 {
-    audioEngine.triggerPad(padIndex, volume, pitch, stopExisting == JNI_TRUE, lengthFraction, pan, gain);
+    audioEngine.triggerPad(padIndex, volume, pitch, stopExisting == JNI_TRUE, lengthFraction, pan, gain, startFraction);
 }
 
 extern "C"

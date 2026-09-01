@@ -36,6 +36,11 @@ struct Voice {
     // 0.1..1.0 — fraction of the sample's total length to actually play
     // before the voice is cut, for the per-pad "LENGTH" trim control.
     std::atomic<float> lengthFraction{1.0f};
+    // 0.0..0.95 — fraction of the sample's total length to SKIP before
+    // playback starts, for the non-destructive per-pad "CROP" start handle
+    // (mirrors lengthFraction, which trims the end). Playback plays the
+    // window [startFraction, lengthFraction] of the sample.
+    std::atomic<float> startFraction{0.0f};
     // -1.0 (full left) .. 0.0 (center) .. 1.0 (full right).
     std::atomic<float> pan{0.0f};
     // Multiplicative trim on top of `volume`, 0.0..2.0 (1.0 = unity).
@@ -87,7 +92,8 @@ public:
                        int channels, int sampleRate);
 
     void triggerPad(int padIndex, float volume, float pitch, bool stopExisting = true,
-                     float lengthFraction = 1.0f, float pan = 0.0f, float gain = 1.0f);
+                     float lengthFraction = 1.0f, float pan = 0.0f, float gain = 1.0f,
+                     float startFraction = 0.0f);
     void setPadVolume(int padIndex, float volume);
     void setPadPitch(int padIndex, float pitch);
     void setPadPan(int padIndex, float pan);

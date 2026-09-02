@@ -568,7 +568,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             AudioRepository.unassignPad(item.id)
         }
         kits[kitIdx].sounds[padIndex] = -1
-        DrumEngine.invalidatePad(padIndex)
+        // Invalidate the actual native slot(s) for this pad in the current
+        // bank mode (not always slot 0-7) so the reload effect below reloads
+        // them with silence. `invalidatePad(padIndex)` alone nulled Bank A's
+        // slot key even when Bank B was the one being cleared.
+        nativeSlotsFor(padIndex).forEach { DrumEngine.invalidatePad(it) }
         persistKits()
     }
 
@@ -1238,6 +1242,14 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 it.assignedKit
             )
         },
+        // BUG FIX: `sounds` was NOT a key here — so CLEAR SOUND on a
+        // FACTORY-only pad (which only flips kits[..].sounds[pad] to -1,
+        // without touching AudioRepository) never re-ran this effect, and
+        // the old factory sample stayed loaded in the native slot: the pad
+        // kept playing after "Clear" until the next kit switch. Custom-sound
+        // clears worked only because unassignPad() mutates AudioRepository
+        // (the key above). Watching the sounds list covers both.
+        kits[currentKit].sounds.toList(),
         kits[currentKit].padReverse.toList()
     ) {
 
@@ -1264,6 +1276,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 it.assignedKit
             )
         },
+        // Same fix as Bank A above — watch the sounds list so CLEAR SOUND /
+        // any factory-only sound change on Bank B reloads its native slots.
+        if (currentKitB in kits.indices) kits[currentKitB].sounds.toList() else emptyList(),
         if (currentKitB in kits.indices) kits[currentKitB].padReverse.toList() else emptyList()
     ) {
         if (currentKitB in kits.indices) {

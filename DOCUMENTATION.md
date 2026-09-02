@@ -308,6 +308,10 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**EDIT MODE "Clear Sound" didn't work on factory pads (2026-09-02)**
+
+`clearPadSound()` sets `kits[..].sounds[pad] = -1`, but the Bank A / Bank B pad-reload `LaunchedEffect`s keyed only on `currentKit`, the `AudioRepository` audio list, and `padReverse` — **not** on the `sounds` list. So clearing a custom sound worked (it mutates `AudioRepository`), but clearing a **factory-only** pad (the common case) changed nothing the effect watched: the native slot kept the old sample and the pad played on until the next kit switch. Fixed by adding `kits[..].sounds.toList()` to both effects' keys, and by making `clearPadSound` invalidate the real `nativeSlotsFor(pad)` slot(s) instead of always slot 0–7.
+
 **Play Store release prep (2026-09-02)**
 
 Repo-side changes toward a publishable build (see `RELEASE_CHECKLIST.md` for the full list, including what still needs a device / Google account):

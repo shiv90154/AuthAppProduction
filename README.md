@@ -1,4 +1,4 @@
-# Octapad — "ARUN SPD 30"
+# ARUN SPD-30 MOBILE OCTAPAD
 
 An 8-pad Android drum sampler built with Jetpack Compose and a native C++/Oboe audio engine tuned for the lowest latency Android's audio stack allows. Inspired by hardware samplers like the Roland SPD series.
 
@@ -22,9 +22,11 @@ This repo also includes a small **admin panel** (Next.js + MongoDB) for managing
 ## Features
 
 - **8 velocity-sensitive pads** (MIDI velocity; touch always full velocity — a hardware limitation, not a software one), multi-touch, per-pad LED
-- **A / B / C banks** — any combination layers together on a pad hit
-- **Kit system** — up to 200 kits, 25 factory kits bundled, Save / Load / Rename (including direct inline rename from the Patch List) / Copy / Delete
-- **Per-pad audio controls** — Volume (0–200%), Pitch, 3-band EQ, Delay, Length trim, Reverse, One Shot / Loop / Mix play modes, 6-level choke groups — all of it works on factory kit sounds, not just imported audio
+- **A / B banks** — two independent 200-kit pools; either or both layer together on a pad hit
+- **Kit system** — up to 200 kits per bank, 25 factory kits bundled, Save / Load / Rename (including direct inline rename from the Patch List) / Copy / Delete
+- **Per-pad audio controls** — Volume (0–200%), Pitch, 3-band EQ, Pan, Gain, Delay, Length/crop trim, Reverse, One Shot / Loop / Multiplay play modes, 4-level choke groups — all of it works on factory kit sounds, not just imported audio
+- **Loop / BPM / SPEED** — BPM-synced loop retrigger; SPEED is a separate varispeed (pitch) control
+- **Master delay** switch on the main strip plus per-pad delay on/off
 - **Waveform crop editor** — trim start/end with zoom, delete a region from the middle
 - **MIDI** — USB + Bluetooth input, MIDI Learn, per-pad note *or* CC mapping (for controllers that send Control Change instead of Note-On), channel select (1–16/ALL), hardware-keyboard fallback (`Q W E R` / `A S D F`) — gated behind a paid add-on flag
 - **Mic recording** straight onto a pad, with proper error handling if the mic is busy
@@ -42,7 +44,9 @@ Prerequisites: Android Studio, NDK `27.0.12077973`, CMake `3.22.1`, JDK 21, and 
 ./gradlew :app:assembleDebug
 ```
 
-Min SDK 24, target SDK 36. The app is landscape-only, and requires activating against a running admin panel on first launch (see below).
+Min SDK 24, target SDK 36. `applicationId` is `com.arunspd30.octapad` (the Play Store identity); the code `namespace` stays `com.example.myapplication` so JNI symbols are unaffected. The app is landscape-only, and requires activating against a running admin panel on first launch (see below).
+
+For Play Store submission steps and remaining blockers, see **[RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)** and **[STORE_LISTING.md](STORE_LISTING.md)**.
 
 ## Running the admin panel
 

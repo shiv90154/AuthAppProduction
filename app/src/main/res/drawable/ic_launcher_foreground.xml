@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground.
+
+  BUG FIX ("logo side se chup ho jata hai"): the old foreground was the
+  mipmap-*/ic_launcher_foreground.png set, which was authored at the LEGACY
+  48dp icon sizes (mdpi 48 / hdpi 72 / xhdpi 96 / xxhdpi 144 / xxxhdpi 192).
+  An adaptive-icon foreground layer is 108dp and the launcher only ever
+  shows the centre 72dp of it — the outer ~18dp on every side is bleed that
+  the launcher mask (circle / squircle / rounded square, OEM-dependent)
+  crops off. A full-bleed 48dp-style image stretched to fill 108dp therefore
+  lost roughly a quarter of the artwork off each edge on most launchers.
+
+  Fix: draw the real logo (drawable-nodpi/logo.png, 512x512) inset 25% on
+  every side, so it lands inside the 54dp centre box — well within the 66dp
+  "safe zone" — and can never be clipped regardless of the launcher's mask.
+-->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/logo"
+    android:insetLeft="25%"
+    android:insetRight="25%"
+    android:insetTop="25%"
+    android:insetBottom="25%" />

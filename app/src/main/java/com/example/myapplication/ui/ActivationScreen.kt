@@ -282,13 +282,18 @@ fun ActivationScreen(onActivated: () -> Unit) {
                     color = TextMuted, fontSize = 10.sp, textAlign = TextAlign.Center
                 )
 
-                // Hindi call-to-action with the direct number, so anyone
-                // stuck on activation can just call/WhatsApp instead of
-                // hunting for support elsewhere.
+                // Direct-number call-to-action (Hindi + English), so anyone
+                // who needs a code — or is stuck activating — can just call/
+                // WhatsApp instead of hunting for support elsewhere.
                 Text(
-                    "एक्टिवेशन में परेशानी हो तो सीधे कॉल या व्हाट्सएप करें",
+                    "एक्टिवेशन कोड चाहिए या एक्टिवेशन में दिक्कत हो?\nसीधे कॉल या व्हाट्सएप करें",
                     color = Color(0xFFB0B0B0), fontSize = 11.sp, textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 14.dp)
+                )
+                Text(
+                    "For an activation code or help, contact us:",
+                    color = TextFaint, fontSize = 9.5.sp, textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 4.dp)
                 )
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

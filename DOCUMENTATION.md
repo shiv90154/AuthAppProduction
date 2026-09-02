@@ -308,6 +308,17 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**Play Store release prep (2026-09-02)**
+
+Repo-side changes toward a publishable build (see `RELEASE_CHECKLIST.md` for the full list, including what still needs a device / Google account):
+
+- `applicationId` → `com.arunspd30.octapad` (Play rejects `com.example.*`). `namespace` stays `com.example.myapplication` so the R class and every `Java_com_example_myapplication_*` JNI symbol are untouched — the two are independent.
+- R8/minify turned on for `release` (`optimization.enable = true`) with real keep rules in `app/src/main/keepRules/rules.keep` (keeps the whole app package + JNI bridge + enums; strips debug `Log.*`).
+- 16 KB page-size link flag in `CMakeLists.txt` (`-Wl,-z,max-page-size=16384`) — Play requirement for native apps.
+- `LicenseRepository.OFFLINE_GRACE_MS` 3 → 14 days.
+- `.gitignore` broadened; `.idea/` untracked. `PRIVACY_POLICY.md` + `RELEASE_CHECKLIST.md` added.
+- Not built/tested (no SDK/NDK here). Cleartext HTTP left enabled per owner's decision (may self-host plain-http server).
+
 **User bug-report batch: branding, logo size, MIDI delay toggle, BPM/SPEED split, kit-change crackle, per-phone display (2026-09-02)**
 
 Client reported eight issues in Hindi; #3 (re-applying delay after editing already-delayed tones in Crop) was explicitly deferred by the client. The rest:

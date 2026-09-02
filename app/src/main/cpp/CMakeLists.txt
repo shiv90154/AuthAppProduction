@@ -24,3 +24,12 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         oboe
         android
         log)
+
+# 16 KB page-size support — Google Play requires all native code in apps
+# targeting Android 15+ to load on devices with a 16 KB memory page size
+# (mandatory for new submissions / updates from Nov 2025). NDK 27 already
+# builds our own .so aligned, but Oboe is fetched + built here via
+# FetchContent, so set the flag on our link line explicitly to be certain
+# every ELF segment in the final library is 16 KB-aligned.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        "-Wl,-z,max-page-size=16384")

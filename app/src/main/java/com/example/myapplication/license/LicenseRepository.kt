@@ -22,7 +22,11 @@ object LicenseRepository {
 
     // How long the app keeps working offline since the last successful
     // server check-in before it insists on reconnecting to re-verify.
-    private const val OFFLINE_GRACE_MS = 3L * 24 * 60 * 60 * 1000 // 3 days
+    // Raised 3 -> 14 days: a genuine paying user who takes their pad on
+    // stage somewhere with no signal for a week shouldn't get locked out,
+    // and it also cushions any short outage of the activation server
+    // (Vercel/Mongo) without every user losing access on day 3.
+    private const val OFFLINE_GRACE_MS = 14L * 24 * 60 * 60 * 1000 // 14 days
 
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)

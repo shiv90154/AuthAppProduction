@@ -1,12 +1,58 @@
-# Add project specific R8 rules here.
-# AGP will combine all keep rule files in src/main/keepRules to pass to R8
-#
-# For more details, see
-#   https://d.android.com/r/tools/r8/keep-rules
+# R8 keep rules for the release (Play Store) build.
+# AGP combines every file in src/main/keepRules/ and passes it to R8.
+# buildTypes.release.optimization.enable = true turns R8 on.
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ── Whole app package ───────────────────────────────────────────────────────
+# This is a small single-module app with no code-size pressure, but it does
+# use reflection-ish patterns (JNI callbacks by name, SharedPreferences-backed
+# state, JSON-shaped kit/backup persistence hand-rolled in KitRepository /
+# BackupScreen). Keeping the whole app package removes every "worked in debug,
+# NPE/ClassNotFound in release" class of bug at the cost of not renaming our
+# own symbols — an acceptable trade for an app this size. R8 still strips
+# logging (below), shrinks unused library code, and optimizes.
+-keep class com.example.myapplication.** { *; }
+-keepclassmembers class com.example.myapplication.** { *; }
+
+# ── JNI bridge (native-lib.cpp / MidiProcessor.cpp call back INTO these by
+#    their exact fully-qualified names) ──────────────────────────────────────
+-keepclasseswithmembernames,includedescriptorclasses class com.example.myapplication.NativeBridge {
+    native <methods>;
+}
+# Native code resolves these Kotlin callbacks by signature (pad-hit / MIDI
+# callback chain — see app/CLAUDE.md's MIDI section).
+-keep class com.example.myapplication.MidiEventBus { *; }
+-keep class com.example.myapplication.NativeBridge { *; }
+
+# ── Oboe (bundled .so, no Java side to keep — here for completeness) ─────────
+-keep class com.google.oboe.** { *; }
+
+# ── Strip debug logging from the release build ─────────────────────────────
+# ProGuard/R8 was disabled for the whole of development, so nothing ever
+# removed the per-hit / per-MIDI-message Log.* calls the codebase is full of.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+    public static int w(...);
+    public static int e(...);
+    public static boolean isLoggable(...);
+}
+
+# ── Kotlin / coroutines / Compose (BOM-managed, usually fine, pinned to be
+#    safe against R8 over-shrinking metadata) ─────────────────────────────────
+-keep class kotlin.Metadata { *; }
+-dontwarn kotlinx.coroutines.**
+-keep class kotlinx.coroutines.android.AndroidDispatcherFactory { *; }
+
+# Compose already ships consumer rules via the BOM; no extra rules needed.
+
+# Parcelable/enum defensive rules (kit/choke/play-mode enums move through
+# persistence as strings, but keep the standard ones anyway).
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+-keepnames class * implements android.os.Parcelable
+-keepclassmembers class * implements android.os.Parcelable {
+    public static final ** CREATOR;
+}

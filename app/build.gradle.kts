@@ -24,7 +24,13 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.myapplication"
+        // Play Store identity — PERMANENT once published, cannot ever be
+        // changed. Deliberately different from `namespace` (which stays
+        // com.example.myapplication so the generated R class and every
+        // JNI symbol `Java_com_example_myapplication_*` in native-lib.cpp /
+        // MidiProcessor.cpp keep working untouched). applicationId and
+        // namespace are independent by design.
+        applicationId = "com.arunspd30.octapad"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
@@ -52,8 +58,17 @@ android {
 
     buildTypes {
         release {
+            // R8 shrink + obfuscate + optimize for the Play Store build.
+            // Keep rules live in src/main/keepRules/rules.keep (AGP auto-
+            // combines every file in that dir and passes it to R8). Was
+            // disabled through development; turned on for release so debug
+            // Log.* calls are stripped, the APK is smaller, and unused
+            // library code is removed. If assembleRelease ever fails after
+            // a dependency bump, first suspect a missing -keep for something
+            // reached only by reflection/JNI and add it to rules.keep —
+            // don't just flip this back to false.
             optimization {
-                enable = false
+                enable = true
             }
             if (releaseStoreFile != null) {
                 signingConfig = signingConfigs.getByName("release")

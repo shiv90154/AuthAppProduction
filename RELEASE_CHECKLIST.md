@@ -21,7 +21,11 @@ Status as of 2 September 2026. Items are grouped by who has to do them.
 - [x] App name → "ARUN SPD-30 MOBILE OCTAPAD"; splash/activation logo resized.
 - [x] `.gitignore` broadened (`/.idea/`, `keystore.properties`);
       `.idea/` untracked.
-- [x] `PRIVACY_POLICY.md` drafted (needs placeholders filled + hosting).
+- [x] Privacy policy written **and hosted** by the admin panel at
+      `/privacy` (`admin-panel/src/app/privacy/page.tsx`, public, no auth) —
+      URL: `https://octapad-adminpanel-final.vercel.app/privacy`. Filled with
+      Inphora Pvt Ltd / Shiv Kumar (Senior Developer) / inphora1@gmail.com.
+      Redeploys on admin-panel push (confirm Vercel picked it up).
 
 ---
 
@@ -58,9 +62,11 @@ Status as of 2 September 2026. Items are grouped by who has to do them.
         1. Integrate Play Billing for the MIDI unlock, or
         2. Make MIDI free and remove `MidiPaywallScreen`, or
         3. Ship the paid unlock only via a non-Play channel.
-- [ ] **Host the privacy policy** at a public HTTPS URL and add it in Play
-      Console → App content → Privacy policy. Fill the `[[ ]]` placeholders
-      in `PRIVACY_POLICY.md` first.
+- [x] ~~Host the privacy policy~~ — done, served at
+      `/privacy` by the admin panel. Just paste
+      `https://octapad-adminpanel-final.vercel.app/privacy` into Play
+      Console → App content → Privacy policy (and verify the page is live
+      after Vercel redeploys).
 - [ ] **Data safety form** (Play Console): declare device identifier +
       email collection, "data encrypted in transit", "data not sold",
       purpose = app functionality / account management.

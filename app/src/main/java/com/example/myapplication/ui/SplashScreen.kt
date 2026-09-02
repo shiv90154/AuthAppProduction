@@ -5,7 +5,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -60,25 +59,24 @@ fun SplashScreen() {
         ) {
             Image(
                 painter = painterResource(R.drawable.logo),
-                contentDescription = "ARUN SPD 30 logo",
+                contentDescription = "ARUN SPD-30 MOBILE OCTAPAD logo",
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
-                    .size(140.dp)
-                    .border(1.dp, LedActive.copy(alpha = 0.35f))
+                    .size(104.dp)
             )
 
-            Spacer(Modifier.height(26.dp))
+            Spacer(Modifier.height(22.dp))
 
             Text(
-                "ARUN SPD 30",
+                "ARUN SPD-30",
                 color = Color.White,
-                fontSize = 26.sp,
+                fontSize = 24.sp,
                 fontWeight = FontWeight.Black,
                 letterSpacing = 3.sp
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "OCTAPAD  ·  8-PAD SAMPLER",
+                "MOBILE OCTAPAD  ·  8-PAD SAMPLER",
                 color = Color(0xFF8A8A8A),
                 fontSize = 10.5.sp,
                 letterSpacing = 2.sp,

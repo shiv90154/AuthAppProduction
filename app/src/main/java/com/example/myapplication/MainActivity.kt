@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -66,21 +67,38 @@ class MainActivity : ComponentActivity() {
         requestMicPermission()
 
         setContent {
-            // NEW: lock text rendering to a fixed scale, ignoring the
-            // device's accessibility "font size" setting. This is a
-            // fixed-pixel hardware-instrument UI (landscape-only drum pad
-            // grid + tightly packed control panel), not a scrolling
-            // document — the same screen should look identical on every
-            // phone regardless of what font-size the user has set in
-            // Android's display settings. Without this, two phones with
-            // different accessibility font-scale settings render the same
-            // layout very differently ("full on some phones, half on
-            // others" — text wrapping/overflowing where it shouldn't).
-            // Real screen density (dp sizing, BoxWithConstraints-based
-            // responsive panel width) is untouched — only fontScale is
-            // pinned to 1x.
+            // "har phone me display alag alag aa raha hai" fix — two parts.
+            //
+            // (1) fontScale pinned to 1x: this is a fixed-pixel hardware-
+            // instrument UI (landscape-only pad grid + tightly packed control
+            // panel), not a scrolling document, so the device's accessibility
+            // "font size" setting must not reflow it.
+            //
+            // (2) Density remap: the bigger cause of the same layout looking
+            // different across phones is effective screen DENSITY: every OEM
+            // ships a different default,
+            // and Android's own "Display size" / "screen zoom" setting
+            // changes it further — so two phones with the identical physical
+            // screen can report very different dp widths, and every fixed-dp
+            // size in this hardware-instrument UI then occupies a different
+            // fraction of the screen.
+            //
+            // We remap density so the usable screen is ALWAYS the same number
+            // of dp wide (REFERENCE_WIDTH_DP) regardless of the device's real
+            // density or zoom setting. Every dp measurement in the app is now
+            // relative to one fixed design width, so the pad grid + control
+            // panel lay out identically everywhere; height still tracks the
+            // device aspect ratio (handled by the existing BoxWithConstraints
+            // height-scaling in OctapadScreen/RightPanel). Purely a uniform
+            // scale — no clipping, no distortion.
+            val referenceWidthDp = 820f
+            val cfg = LocalConfiguration.current
+            val realDensity = LocalDensity.current.density
+            val currentWidthDp = cfg.screenWidthDp.toFloat().coerceAtLeast(1f)
+            val scaledDensity = (realDensity * (currentWidthDp / referenceWidthDp))
+                .coerceIn(0.5f, 8f)
             val fixedDensity = Density(
-                density = LocalDensity.current.density,
+                density = scaledDensity,
                 fontScale = 1f
             )
             CompositionLocalProvider(LocalDensity provides fixedDensity) {

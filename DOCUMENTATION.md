@@ -308,6 +308,20 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**User bug-report batch: branding, logo size, MIDI delay toggle, BPM/SPEED split, kit-change crackle, per-phone display (2026-09-02)**
+
+Client reported eight issues in Hindi; #3 (re-applying delay after editing already-delayed tones in Crop) was explicitly deferred by the client. The rest:
+
+- **App name → "ARUN SPD-30 MOBILE OCTAPAD".** `strings.xml` `app_name` plus the on-screen wordmarks in `SplashScreen.kt`, `ActivationScreen.kt`, `RightPanel.kt`.
+- **App logo smaller** so the full artwork + name are visible: splash logo 140→104dp (border removed), activation logo `ContentScale.Crop`→`Fit` and 72→64dp.
+- **MIDI note DELAY_TOGGLE only ever turned delay ON.** The raw Note-On handler installed in `LaunchedEffect(Unit)` captured `curPadDelayEnabled` (a per-recomposition `val`) once at first composition — always `false` — so `!curPadDelayEnabled` was always `true`. Now calls a new `toggleCurPadDelayEnabled()` that re-reads the pad's live flag from `kits[bankKitIdx()].padDelayEnabled` at call time.
+- **BPM and SPEED are now separate concerns.** SPEED (LOOP panel) became a pitch/varispeed multiplier on the sample (`fire()` multiplies voice pitch by `speed`, coerced 0.25–4×), removed from all loop-interval math. BPM is now the sole loop-tempo input (`60_000f / bpm`). Per-pad LOOP mode stays gapless (retriggers on `durationToShow / speed`). Fixes "speed se tone cut-cut" and "BPM loop me kaam nahi karta".
+- **Master delay pulled out of the DELAY panel** onto the main control strip as a `MASTER DELAY: ON/OFF` bar (per-pad DLY toggle stays next to VOL).
+- **Crackle when changing kit while pads still sound.** `AudioEngine::loadPadBuffer` now flags any voice currently playing the reloaded pad as `releasing` (under `bufferMutex_`) before swapping the sample in, so it fades out over ~5ms instead of jumping mid-waveform into the new buffer.
+- **"Display har phone me alag."** `MainActivity` remaps `LocalDensity` so the usable screen is always `820dp` wide (`scaledDensity = realDensity * screenWidthDp / 820`), cancelling per-OEM density and the "Display size"/zoom setting; layout is now uniform across phones, height still tracks aspect ratio.
+
+Not device-tested (no Android SDK/NDK in this environment) — the audio-engine and density changes especially need an on-device pass.
+
 **User bug-report batch: kit-load slots, non-destructive crop, loop SPEED, delay drop (2026-09-01)**
 
 Five issues reported by the client in Hindi:

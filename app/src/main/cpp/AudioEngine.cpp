@@ -114,6 +114,22 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
     }
 
     std::lock_guard<std::mutex> lock(bufferMutex_);
+
+    // BUG FIX ("khich khich awaaz jab patch badal ke bajate hain"): swapping
+    // buffers_[padIndex].samples out from under a voice that is CURRENTLY
+    // playing this slot means the next audio callback reads a completely
+    // different waveform from wherever v.position happened to be — an
+    // instant amplitude discontinuity = a click/pop, heard every time the
+    // user changes kit while pads are still sounding and keeps playing. Flag
+    // any live voice on this pad as `releasing` so the audio thread ramps it
+    // down over ~5ms instead of hard-cutting into the new sample. New hits
+    // after the swap claim fresh voices and play the new buffer cleanly.
+    for (auto &v : voices_) {
+        if (v.ready.load(std::memory_order_acquire) && v.padIndex == padIndex) {
+            v.releasing.store(true, std::memory_order_release);
+        }
+    }
+
     buffers_[padIndex].samples    = std::move(stereo);
     buffers_[padIndex].channels   = 2;
     buffers_[padIndex].sampleRate = sampleRate;

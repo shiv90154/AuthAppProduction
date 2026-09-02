@@ -168,16 +168,16 @@ fun ActivationScreen(onActivated: () -> Unit) {
                 )
                 Image(
                     painter = painterResource(R.drawable.logo),
-                    contentDescription = "ARUN SPD 30 logo",
-                    contentScale = ContentScale.Crop,
+                    contentDescription = "ARUN SPD-30 MOBILE OCTAPAD logo",
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier
-                        .size(72.dp)
+                        .size(64.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .border(1.dp, LedActive.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
                 )
             }
             Spacer(Modifier.height(16.dp))
-            Text("ARUN SPD 30", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, letterSpacing = 4.sp)
+            Text("ARUN SPD-30 MOBILE OCTAPAD", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, textAlign = TextAlign.Center)
             Text(
                 "Enter your activation code to continue",
                 color = TextMuted, fontSize = 12.5.sp, textAlign = TextAlign.Center,

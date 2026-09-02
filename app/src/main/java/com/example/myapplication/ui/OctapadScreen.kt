@@ -881,6 +881,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             playbackDurationMs = durationToShow
             playbackPositionMs = 0L
 
+            // SPEED (LOOP panel) now behaves like a pitch/varispeed control —
+            // it multiplies the sample playback rate (higher = faster + higher
+            // pitched, lower = slower + lower pitched), exactly like the PITCH
+            // knob, and is DELIBERATELY independent of BPM. BPM alone controls
+            // the loop retrigger tempo (see the wait-window math below); SPEED
+            // alone controls how the sample itself sounds. They used to be
+            // tangled together (SPEED scaled the loop interval and did nothing
+            // to pitch), which is what read as "speed se tone cut-cut aata
+            // hai" and "bpm loop me kaam nahi karta".
+            val speedPitchMul = speed.coerceIn(0.25f, 4f)
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
                     slot >= 8  -> currentKitB
@@ -890,7 +900,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     DrumEngine.trigger(
                         slot,
                         kits[kitForSlot].volumes[index] * effectiveVelocity,
-                        kits[kitForSlot].pitches[index],
+                        kits[kitForSlot].pitches[index] * speedPitchMul,
                         stopExisting = !allowOverlap,
                         lengthFraction = kits[kitForSlot].padLengthPct.getOrElse(index) { 1f },
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
@@ -927,7 +937,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // then truncating once at the very end, keeps BPM and
                     // Speed both accurate instead of BPM silently losing
                     // precision before Speed ever sees it.
-                    val beatIntervalMs = (60_000f / bpm.coerceAtLeast(1) / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
+                    // BPM is now the ONLY thing that sets the loop retrigger
+                    // tempo — SPEED was removed from here and turned into a
+                    // pitch/varispeed control on the sample itself (see fire()
+                    // above). One beat = 60000/BPM ms, floored at 50ms.
+                    val beatIntervalMs = (60_000f / bpm.coerceAtLeast(1)).toLong().coerceAtLeast(50L)
                     // BUG FIX: per-pad LOOP play mode used to be BPM-gated
                     // exactly like the global Loop toggle (wait for
                     // max(beatInterval, duration) before retriggering) — so
@@ -953,7 +967,14 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // sample's own natural gap is scaled by the playback-
                     // rate-like SPEED multiplier, same idea as the beat-grid
                     // scaling above, just applied to LOOP mode's own interval.
-                    val loopModeIntervalMs = (durationToShow / speed.coerceAtLeast(0.1f)).toLong().coerceAtLeast(50L)
+                    // Per-pad LOOP mode = a true gapless back-to-back repeat of
+                    // the sample, NOT beat-gated (beat-gating it reintroduces
+                    // the "bahut time-time me bajta hai" silence gap). Since
+                    // SPEED now actually plays the sample faster/slower (it's a
+                    // pitch multiplier), the real audible length is
+                    // durationToShow / speed — retrigger on that so the repeat
+                    // stays seamless at any SPEED.
+                    val loopModeIntervalMs = (durationToShow / speed.coerceIn(0.25f, 4f)).toLong().coerceAtLeast(50L)
                     // BUG FIX: the global Loop toggle's retrigger window used
                     // to be maxOf(beatIntervalMs, durationToShow) — so once
                     // SPEED made a beat shorter than the sample, raising SPEED
@@ -1120,6 +1141,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         if (bankKitIdx() in kits.indices) {
             kits[bankKitIdx()].padDelayEnabled[selectedPad] = enabled
             persistKits()
+        }
+    }
+
+    // Flip the current pad's delay flag, reading its LIVE value at call time.
+    // Must NOT go through `!curPadDelayEnabled` from inside a long-lived
+    // closure (MidiEventBus.onRawNoteOn) — that `val` is captured once at
+    // first composition and goes stale, so every press computed `!false` and
+    // the toggle only ever turned delay ON, never OFF (reported bug).
+    fun toggleCurPadDelayEnabled() {
+        val bk = bankKitIdx()
+        if (bk in kits.indices) {
+            val cur = kits[bk].padDelayEnabled.getOrElse(selectedPad) { false }
+            setCurPadDelayEnabled(!cur)
         }
     }
 
@@ -1370,7 +1404,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
 
                 nm.getNote("DELAY_TOGGLE") -> {
-                    setCurPadDelayEnabled(!curPadDelayEnabled)
+                    toggleCurPadDelayEnabled()
                 }
 
                 nm.getNote("BANK_A") -> {

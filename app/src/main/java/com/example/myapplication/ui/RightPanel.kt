@@ -342,7 +342,12 @@ fun RightPanel(
         // makes heightScale shrink a little further whenever Bank B is on,
         // so the nav row stays on-screen instead of being silently dropped.
         val bankBExtra = if ('B' in bankMode) 40.dp else 0.dp
-        val heightScale = (maxHeight / (380.dp + bankBExtra)).coerceIn(0.72f, 1f)
+        // 406dp (was 380) — bumped when the MASTER DELAY bar + its spacer
+        // (~26dp) were added to the strip; folding that into the reference
+        // budget keeps heightScale shrinking enough that the bottom PATCH
+        // LIST nav row still fits on short screens instead of being clipped
+        // (this column has no scroll fallback by design).
+        val heightScale = (maxHeight / (406.dp + bankBExtra)).coerceIn(0.72f, 1f)
         fun vSpace(base: Dp): Dp = base * heightScale
         val sliderTrackH = 68.dp * heightScale
         Column(
@@ -361,7 +366,7 @@ fun RightPanel(
             // ── EQ / MIDI / MUSIC ─────────────────────────────────────────────
             // EQ button: toggle EQPanel; other buttons: close EQPanel
             Text(
-                text = "ARUN SPD 30",
+                text = "ARUN SPD-30 MOBILE OCTAPAD",
                 color = Color(0xFF00E5FF),
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
@@ -381,6 +386,31 @@ fun RightPanel(
                     }
                 }
             )
+
+            Spacer(modifier = Modifier.height(vSpace(3.dp)))
+
+            // MASTER DELAY — pulled OUT of the DELAY panel onto the main strip
+            // per explicit request ("master delay bahar rakho"). Global kill
+            // switch: OFF mutes delay on every pad at once without touching any
+            // pad's own DLY flag; ON restores exactly the pads that had it.
+            // The per-pad "DLY" toggle stays where it is (next to VOL, below).
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (delayMasterEnabled) Color(0xFF00C853) else BtnBg)
+                    .pointerInput(delayMasterEnabled) {
+                        detectTapGestures { onDelayMasterEnabledChange(!delayMasterEnabled) }
+                    }
+                    .padding(vertical = 6.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (delayMasterEnabled) "MASTER DELAY: ON" else "MASTER DELAY: OFF",
+                    color = if (delayMasterEnabled) Color.Black else Color(0xFF888888),
+                    fontSize = 8.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center
+                )
+            }
 
             Spacer(modifier = Modifier.height(vSpace(4.dp)))
 

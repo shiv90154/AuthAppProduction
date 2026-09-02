@@ -130,7 +130,7 @@ fun TempoPanel(
                     BpmStepButton("RESET") { onSpeedChange(1f) }
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Scales BPM-synced Loop retriggers and per-pad LOOP mode",
+                        "Varispeed: plays the sample faster/slower + higher/lower pitched, like the PITCH knob. Independent of BPM.",
                         color = TempoTextMuted, fontSize = 8.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()

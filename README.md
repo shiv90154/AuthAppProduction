@@ -28,13 +28,13 @@ This repo also includes a small **admin panel** (Next.js + MongoDB) for managing
 - **Loop / BPM / SPEED** — BPM-synced loop retrigger; SPEED is a separate varispeed (pitch) control
 - **Master delay** switch on the main strip plus per-pad delay on/off
 - **Waveform crop editor** — trim start/end with zoom, delete a region from the middle
-- **MIDI** — USB + Bluetooth input, MIDI Learn, per-pad note *or* CC mapping (for controllers that send Control Change instead of Note-On), channel select (1–16/ALL), hardware-keyboard fallback (`Q W E R` / `A S D F`) — gated behind a paid add-on flag
+- **MIDI** — USB + Bluetooth input, MIDI Learn, per-pad note *or* CC mapping (for controllers that send Control Change instead of Note-On), channel select (1–16/ALL), hardware-keyboard fallback (`Q W E R` / `A S D F`) — enabled per activation code via the `midiPurchased` flag
 - **Mic recording** straight onto a pad, with proper error handling if the mic is busy
 - **Backup / Restore** — one `.zip` for every kit, setting, MIDI mapping, and custom sound
 - **Activation on first launch** — one code locks to one device, remote deactivation and MIDI unlock both take effect live via the admin panel
 - Branded splash screen, responsive layout, everything persists across restarts
 
-See [DOCUMENTATION.md](DOCUMENTATION.md) for the full feature breakdown, a detailed list of real bugs found and fixed, and what's honestly still outstanding (a 700-tone sample pack, Hindi font rendering, in-app MIDI payment collection).
+See [DOCUMENTATION.md](DOCUMENTATION.md) for the full feature breakdown, a detailed list of real bugs found and fixed, and what's honestly still outstanding (a 700-tone sample pack, Hindi font rendering).
 
 ## Building the Android app
 

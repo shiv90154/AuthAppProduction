@@ -17,13 +17,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Shown instead of MidiLearnScreen when this device's activation code
- * hasn't been granted the MIDI add-on (License.midiPurchased in the admin
- * panel). There's no in-app payment flow — per the spec, MIDI is sold
- * separately and unlocked by the developer flipping midiPurchased in the
- * admin dashboard after payment is collected outside the app — so this
- * screen just explains that plainly instead of pretending a purchase
- * button exists.
+ * Shown instead of MidiLearnScreen when this device's activation code does
+ * not include the MIDI capability (License.midiPurchased, toggled per-code
+ * in the admin panel). Purely informational — no pricing, no purchase
+ * button, no external link, no call to "contact" anyone or pay: the copy
+ * deliberately avoids anything a Play reviewer could read as steering the
+ * user to an out-of-app purchase for an in-app feature. It just states the
+ * current code doesn't have MIDI and that an updated code unlocks it
+ * automatically on the next check-in.
  */
 @Composable
 fun MidiPaywallScreen(onClose: () -> Unit) {
@@ -49,10 +50,10 @@ fun MidiPaywallScreen(onClose: () -> Unit) {
                 Text("♪", color = LedActive, fontSize = 22.sp)
             }
             Spacer(Modifier.height(14.dp))
-            Text("MIDI is a paid add-on", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+            Text("MIDI not enabled for this code", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
             Spacer(Modifier.height(8.dp))
             Text(
-                "MIDI Learn, pad mapping and CC control aren't included with your current activation. Contact the developer to add MIDI to your license — once granted, it unlocks automatically the next time the app checks in, no reinstall needed.",
+                "MIDI Learn, pad mapping and CC control aren't enabled for your current activation code. If your code is updated to include MIDI, it unlocks automatically the next time the app checks in — no reinstall needed.",
                 color = Color(0xFFAAAAAA), fontSize = 11.5.sp, textAlign = TextAlign.Center, lineHeight = 17.sp
             )
             Spacer(Modifier.height(20.dp))

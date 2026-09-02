@@ -9,10 +9,11 @@ Status as of 2 September 2026. Items are grouped by who has to do them.
 - [x] `applicationId` changed `com.example.myapplication` → `com.arunspd30.octapad`
       (Play rejects `com.example.*`). `namespace` left unchanged so JNI
       symbols and the R class are untouched. **This ID is now permanent.**
-- [x] R8 / minify enabled for the release build
-      (`buildTypes.release.optimization.enable = true`) with keep rules in
-      `app/src/main/keepRules/rules.keep` — strips debug `Log.*`, shrinks
-      the APK, keeps the whole app package + JNI bridge + enums.
+- [~] R8 / minify keep rules written (`app/src/main/keepRules/rules.keep`)
+      but minify itself is left **OFF** — enabling it in AGP 9.x needs the
+      experimental "gradual R8" flag and a device to validate the shrunk
+      build. Not a Play blocker. See the comment in `app/build.gradle.kts`
+      `buildTypes.release` for the 3-step enable procedure to do later.
 - [x] 16 KB page-size link flag added to `app/src/main/cpp/CMakeLists.txt`
       (`-Wl,-z,max-page-size=16384`) — required for native apps on Play.
 - [x] Offline licensing grace period raised 3 → 14 days

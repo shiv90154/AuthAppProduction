@@ -58,17 +58,27 @@ android {
 
     buildTypes {
         release {
-            // R8 shrink + obfuscate + optimize for the Play Store build.
-            // Keep rules live in src/main/keepRules/rules.keep (AGP auto-
-            // combines every file in that dir and passes it to R8). Was
-            // disabled through development; turned on for release so debug
-            // Log.* calls are stripped, the APK is smaller, and unused
-            // library code is removed. If assembleRelease ever fails after
-            // a dependency bump, first suspect a missing -keep for something
-            // reached only by reflection/JNI and add it to rules.keep —
-            // don't just flip this back to false.
+            // R8 / minify is intentionally OFF for now.
+            //
+            // It is NOT required to publish on Play — the only downsides of
+            // leaving it off are a larger APK and debug Log.* calls shipping
+            // in the binary. Turning it on in this AGP version (9.x) needs
+            // the experimental "gradual R8" path
+            // (optimization.enable=true + android.r8.gradual.support=true in
+            // gradle.properties), which can't be validated here without a
+            // device to test the shrunk release build against.
+            //
+            // To enable it later, on a machine where you can test the
+            // release build end-to-end (kits load/save, factory sounds,
+            // backup/restore, MIDI/JNI, activation):
+            //   1) add `android.r8.gradual.support=true` to gradle.properties
+            //   2) set `optimization { enable = true }` here
+            //   3) keep rules are already written in
+            //      app/src/main/keepRules/rules.keep
+            // If assembleRelease then fails, add a `-keep` for whatever is
+            // reached only by reflection/JNI — don't just turn it back off.
             optimization {
-                enable = true
+                enable = false
             }
             if (releaseStoreFile != null) {
                 signingConfig = signingConfigs.getByName("release")

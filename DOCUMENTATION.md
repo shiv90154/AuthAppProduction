@@ -313,7 +313,7 @@ npm run build       # production build check
 Repo-side changes toward a publishable build (see `RELEASE_CHECKLIST.md` for the full list, including what still needs a device / Google account):
 
 - `applicationId` → `com.arunspd30.octapad` (Play rejects `com.example.*`). `namespace` stays `com.example.myapplication` so the R class and every `Java_com_example_myapplication_*` JNI symbol are untouched — the two are independent.
-- R8/minify turned on for `release` (`optimization.enable = true`) with real keep rules in `app/src/main/keepRules/rules.keep` (keeps the whole app package + JNI bridge + enums; strips debug `Log.*`).
+- R8/minify keep rules written (`app/src/main/keepRules/rules.keep`, keeps the whole app package + JNI bridge + enums) but minify left OFF — AGP 9.x needs the experimental "gradual R8" flag and a device to validate the shrunk build; not a Play blocker. Enable procedure is in `app/build.gradle.kts`'s `buildTypes.release` comment.
 - 16 KB page-size link flag in `CMakeLists.txt` (`-Wl,-z,max-page-size=16384`) — Play requirement for native apps.
 - `LicenseRepository.OFFLINE_GRACE_MS` 3 → 14 days.
 - `.gitignore` broadened; `.idea/` untracked. `PRIVACY_POLICY.md` + `RELEASE_CHECKLIST.md` added.

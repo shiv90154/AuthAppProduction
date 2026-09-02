@@ -308,6 +308,10 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**On-screen VOL / PITCH sliders didn't affect a sounding pad (2026-09-02)**
+
+`RightPanel`'s `onVolumeChange` / `onPitchChange` only wrote the kit value + `persistKitsDebounced()` — unlike the Pan/Gain/EQ sliders and the MIDI-CC path, they never called `DrumEngine.setVolume` / `setPitch`. So dragging VOL or PITCH did nothing to a currently sounding or looping pad; it only took effect on the next hit. Now both push to native live via `nativeSlotsFor(selectedPad)`, and PITCH is multiplied by `speed` to match `fire()`'s varispeed so a live drag and the next retrigger agree (the MIDI-CC PITCH handler got the same `* speed` for consistency).
+
 **EDIT MODE "Clear Sound" didn't work on factory pads (2026-09-02)**
 
 `clearPadSound()` sets `kits[..].sounds[pad] = -1`, but the Bank A / Bank B pad-reload `LaunchedEffect`s keyed only on `currentKit`, the `AudioRepository` audio list, and `padReverse` — **not** on the `sounds` list. So clearing a custom sound worked (it mutates `AudioRepository`), but clearing a **factory-only** pad (the common case) changed nothing the effect watched: the native slot kept the old sample and the pad played on until the next kit switch. Fixed by adding `kits[..].sounds.toList()` to both effects' keys, and by making `clearPadSound` invalidate the real `nativeSlotsFor(pad)` slot(s) instead of always slot 0–7.

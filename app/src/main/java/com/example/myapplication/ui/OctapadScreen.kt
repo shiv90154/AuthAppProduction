@@ -1345,7 +1345,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 cc.getCc("PITCH") -> {
                     val newPitch = 0.5f + normalized * 1.5f
                     kits[bankKitIdx()].pitches[selectedPad] = newPitch
-                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, newPitch) }
+                    val p = newPitch * speed.coerceIn(0.25f, 4f)  // match fire()'s varispeed
+                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, p) }
                     persistKitsDebounced()
                 }
 
@@ -2232,13 +2233,23 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 padPitch = kits[bankKitIdx()].pitches[selectedPad],
 
 
-                onVolumeChange = {
-                    kits[bankKitIdx()].volumes[selectedPad] = it
+                // BUG FIX: these used to only write the kit value + persist,
+                // so dragging the on-screen VOL/PITCH slider did nothing to a
+                // currently sounding / looping pad — it only took effect on
+                // the NEXT hit. Pan/Gain/EQ sliders and the MIDI-knob path
+                // all push to native live; VOL/PITCH now do too. Pitch is
+                // multiplied by SPEED to match fire()'s varispeed handling so
+                // a live drag and the next retrigger agree.
+                onVolumeChange = { v ->
+                    kits[bankKitIdx()].volumes[selectedPad] = v
+                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setVolume(it, v) }
                     persistKitsDebounced()
                 },
 
-                onPitchChange = {
-                    kits[bankKitIdx()].pitches[selectedPad] = it
+                onPitchChange = { v ->
+                    kits[bankKitIdx()].pitches[selectedPad] = v
+                    val p = v * speed.coerceIn(0.25f, 4f)
+                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, p) }
                     persistKitsDebounced()
                 },
                 kits          = kits,

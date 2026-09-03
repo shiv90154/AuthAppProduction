@@ -13,6 +13,10 @@ object PreferencesRepository {
     private const val KEY_BPM = "bpm"
     private const val KEY_EXCLUSIVE_MODE = "exclusive_mode"
     private const val KEY_LOOP_ENABLED = "loop_enabled"
+    // NEW: LOOP is now per-kit, not one global switch — turning it on in a kit
+    // only loops that kit; changing patch drops it, coming back restores it.
+    // Stored as a comma-separated list of kit indices that have LOOP on.
+    private const val KEY_LOOP_ENABLED_KITS = "loop_enabled_kits"
     private const val KEY_DELAY_ENABLED = "delay_enabled"
     private const val KEY_DELAY_CHOKE_PAD = "delay_choke_pad"
     private const val KEY_DELAY_LEVEL = "delay_level"
@@ -52,6 +56,18 @@ object PreferencesRepository {
     }
 
     fun loadLoopEnabled(): Boolean = prefs()?.getBoolean(KEY_LOOP_ENABLED, false) ?: false
+
+    // Per-kit LOOP state. On first read for an install that only ever had the
+    // old global flag, seed from it so a user who had LOOP on doesn't lose it.
+    fun saveLoopEnabledKits(indices: Set<Int>) {
+        prefs()?.edit()?.putString(KEY_LOOP_ENABLED_KITS, indices.sorted().joinToString(","))?.apply()
+    }
+
+    fun loadLoopEnabledKits(): Set<Int> {
+        val raw = prefs()?.getString(KEY_LOOP_ENABLED_KITS, null)
+        if (raw == null) return emptySet()
+        return raw.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
+    }
 
     // Global delay MASTER kill switch (DelayPanel.kt) — defaults to on so it
     // never silently mutes a pad's own delay flag for anyone upgrading.

@@ -9,6 +9,8 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -51,6 +53,10 @@ fun RightPanel(
     onKitNext: () -> Unit,
     onOpenKitList: () -> Unit,
     onOpenKitListB: () -> Unit = {},
+    // NEW: MIDI-note "FX" / "MASTER_DELAY" targets — OctapadScreen increments
+    // these counters; each change toggles the matching side panel here.
+    openFxPanelRequest: Int = 0,
+    openDelayPanelRequest: Int = 0,
     onOpenImport: () -> Unit,
     onOpenAudios: () -> Unit,
     onOpenExport: () -> Unit,
@@ -166,6 +172,26 @@ fun RightPanel(
         showTempoPanel = false
         showChokePanel = false
         showDelayPanel = false
+    }
+
+    // NEW: hardware-button (MIDI note) open/close for FX + MASTER DELAY.
+    // Skip the very first composition (request == 0) so the panels don't
+    // pop open on launch; every later increment toggles.
+    LaunchedEffect(openFxPanelRequest) {
+        if (openFxPanelRequest > 0) {
+            val wasOpen = showEqPanel
+            closeAllPanels()
+            showEqPanel = !wasOpen
+            activeBtn = if (showEqPanel) "FX" else ""
+        }
+    }
+    LaunchedEffect(openDelayPanelRequest) {
+        if (openDelayPanelRequest > 0) {
+            val wasOpen = showDelayPanel
+            closeAllPanels()
+            showDelayPanel = !wasOpen
+            activeBtn = if (showDelayPanel) "DELAY" else ""
+        }
     }
 
     // Same proportions the original fixed dp values had relative to the
@@ -350,12 +376,25 @@ fun RightPanel(
         val heightScale = (maxHeight / (406.dp + bankBExtra)).coerceIn(0.72f, 1f)
         fun vSpace(base: Dp): Dp = base * heightScale
         val sliderTrackH = 68.dp * heightScale
+        // BUG FIX (user report: "kisi ke phone me pura, kisi me aadha —
+        // bank ya A+B dabane pe patch list pura hide ho jata hai"): the
+        // proportional heightScale trim above is floored at 0.72, so on a
+        // short-aspect phone — especially with Bank B's extra kit-selector
+        // row showing after tapping BANK/A+B — the fixed dp budget still
+        // overflows maxHeight and, with no scroll fallback, the bottom
+        // "< PATCH LIST >" nav row gets clipped off entirely. Earlier notes
+        // here said "fix by trimming, not scroll" — that approach has been
+        // re-tuned repeatedly and users still hit it, so a bounded
+        // verticalScroll is added as a genuine fallback: on tall screens
+        // nothing scrolls (content fits), on short ones the strip stays
+        // fully reachable instead of losing its bottom controls.
         Column(
             modifier = Modifier
                 .width(controlPanelWidth)
                 .fillMaxHeight()
                 .clip(RoundedCornerShape(12.dp))
                 .background(PanelBg)
+                .verticalScroll(rememberScrollState())
                 .padding(vSpace(6.dp)),
             verticalArrangement = Arrangement.spacedBy(vSpace(3.dp))
         ) {

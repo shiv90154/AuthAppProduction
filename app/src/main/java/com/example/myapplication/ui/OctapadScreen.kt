@@ -165,7 +165,23 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         }
     }
 
-    var loopEnabled by remember { mutableStateOf(PreferencesRepository.loadLoopEnabled()) }
+    // LOOP is per-kit now (user: "jis kit me loop on ho usi me rahe, patch
+    // change karne pe hat jaye"). `loopEnabledKits` holds the kit indices
+    // that currently have LOOP on; the `loopOnForCurrentKit()` /
+    // `setLoopForCurrentKit()` helpers (declared just after `bankKitIdx()`,
+    // which they need) read/write it live for whichever bank/kit is active.
+    val loopEnabledKits = remember {
+        mutableStateListOf<Int>().apply {
+            val saved = PreferencesRepository.loadLoopEnabledKits()
+            when {
+                saved.isNotEmpty() -> addAll(saved)
+                // One-time migration: an install that only ever had the old
+                // global LOOP flag on carries it over onto kit 0 so LOOP
+                // isn't silently lost on upgrade.
+                PreferencesRepository.loadLoopEnabled() -> add(0)
+            }
+        }
+    }
     var velocityOn by remember { mutableStateOf(PreferencesRepository.loadVelocityOn()) }
     var midiChannel by remember { mutableStateOf(PreferencesRepository.loadMidiChannel()) }
     var currentStreamId by remember { mutableStateOf(0) }
@@ -474,6 +490,18 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         return if (slots.isEmpty()) listOf(padIdx) else slots
     }
 
+    // Per-kit LOOP toggle (see `loopEnabledKits` up top). Both read
+    // `bankKitIdx()` live, so switching patch immediately flips whether the
+    // currently-selected kit is looping — a loop started on one kit stops the
+    // moment you leave that kit and resumes when you come back.
+    fun loopOnForCurrentKit(): Boolean = bankKitIdx() in loopEnabledKits
+    fun setLoopForCurrentKit(on: Boolean) {
+        val k = bankKitIdx()
+        if (on) { if (k !in loopEnabledKits) loopEnabledKits.add(k) }
+        else loopEnabledKits.remove(k)
+        PreferencesRepository.saveLoopEnabledKits(loopEnabledKits.toSet())
+    }
+
     // Sync per-pad EQ to native whenever currentKit or selectedPad changes
     // (handled by separate LaunchedEffect further below — just save kit index here)
     LaunchedEffect(currentKit) {
@@ -575,6 +603,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         nativeSlotsFor(padIndex).forEach { DrumEngine.invalidatePad(it) }
         persistKits()
     }
+
+    // NEW: MIDI-note "FX" / "MASTER_DELAY" targets bump these counters;
+    // RightPanel watches them and toggles its own FX / DELAY panel open.
+    var openFxPanelRequest by remember { mutableStateOf(0) }
+    var openDelayPanelRequest by remember { mutableStateOf(0) }
 
     var showKitList  by remember { mutableStateOf(false) }
     // NEW: which bank the open KitListScreen selects into — false = Bank A's
@@ -714,7 +747,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             return when (currentMode) {
                 "LOOP" -> true
                 "MIX"  -> false
-                else   -> loopEnabled
+                // Per-kit LOOP: read live so leaving this kit (patch change)
+                // stops the loop and returning to it resumes.
+                else   -> loopOnForCurrentKit()
             }
         }
         // A/B/C Bank: which native slot(s) this logical pad should sound on.
@@ -978,20 +1013,30 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // pitch multiplier), the real audible length is
                     // durationToShow / speed — retrigger on that so the repeat
                     // stays seamless at any SPEED.
-                    val loopModeIntervalMs = (durationToShow / speed.coerceIn(0.25f, 4f)).toLong().coerceAtLeast(50L)
-                    // BUG FIX: the global Loop toggle's retrigger window used
-                    // to be maxOf(beatIntervalMs, durationToShow) — so once
-                    // SPEED made a beat shorter than the sample, raising SPEED
-                    // further did nothing at all ("loop mode me speed kaam
-                    // nahi kar raha"). beatIntervalMs is already BPM/SPEED
-                    // scaled; use it directly (floored at 50ms) so SPEED
-                    // always tightens/loosens the loop, cutting the sample
-                    // short when the beat is shorter than it — which is the
-                    // whole point of a loop speed control.
+                    // BUG FIX (user reports, 2026-09-03):
+                    //  (a) "BPM loop mode me kaam nahi karta, one-shot me karta
+                    //      hai" — BPM used to gate only the global-toggle case;
+                    //      per-pad PLAY MODE = LOOP ignored it entirely.
+                    //  (b) "speed badhane par loop cut jata hai, poora tone
+                    //      play nahi hota" — a sample longer than the retrigger
+                    //      window got chopped mid-playback every repeat.
+                    // Both loop cases now use the SAME window:
+                    //     maxOf(beatIntervalMs, audibleLenMs)
+                    // where audibleLenMs is the sample's REAL playing length
+                    // after SPEED (SPEED is a pitch/varispeed multiplier in
+                    // fire(), so a 2x-speed sample truly finishes in half the
+                    // wall-clock time). maxOf guarantees the sample is never
+                    // cut (window >= its audible length) AND that BPM still
+                    // sets the tempo whenever the beat is longer than the
+                    // sample. A short sample at a slow BPM now leaves a
+                    // rhythmic gap between repeats — that is intended: the
+                    // client explicitly asked for BPM to drive LOOP mode too.
+                    val audibleLenMs = (durationToShow / speed.coerceIn(0.25f, 4f))
+                        .toLong().coerceAtLeast(50L)
                     val waitWindowMs = when {
-                        currentMode == "LOOP" -> loopModeIntervalMs
-                        effectiveLoop()        -> beatIntervalMs
-                        else                    -> durationToShow
+                        currentMode == "LOOP" -> maxOf(beatIntervalMs, audibleLenMs)
+                        effectiveLoop()       -> maxOf(beatIntervalMs, audibleLenMs)
+                        else                  -> durationToShow
                     }
 
                     val startTime = System.currentTimeMillis()
@@ -1221,7 +1266,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     // NEW: Persist remaining app state so re-opening the app resumes exactly
     // where it was left off, instead of resetting to defaults.
-    LaunchedEffect(loopEnabled)     { PreferencesRepository.saveLoopEnabled(loopEnabled) }
+    // LOOP is per-kit now — persisted inside setLoopForCurrentKit(), no
+    // global flag to mirror here anymore.
     LaunchedEffect(velocityOn)      { PreferencesRepository.saveVelocityOn(velocityOn) }
     LaunchedEffect(midiChannel) {
         PreferencesRepository.saveMidiChannel(midiChannel)
@@ -1412,7 +1458,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
 
                 nm.getNote("EDIT") -> {
-                    topPanel = "EDIT"
+                    // BUG FIX: was always `topPanel = "EDIT"` — pressing the
+                    // mapped button again never closed the editor. Toggle it.
+                    topPanel = if (topPanel == "EDIT") "" else "EDIT"
                 }
 
                 nm.getNote("SAVE") -> {
@@ -1433,6 +1481,17 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 nm.getNote("BANK_AB") -> {
                     bankMode = "AB"
+                }
+
+                // NEW: open (toggle) the FX panel / MASTER DELAY panel from a
+                // hardware button. The panel open-state lives inside
+                // RightPanel, so we bump a request counter it observes.
+                nm.getNote("FX") -> {
+                    openFxPanelRequest++
+                }
+
+                nm.getNote("MASTER_DELAY") -> {
+                    openDelayPanelRequest++
                 }
             }
         }
@@ -1527,6 +1586,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             kits[it].factoryKitNumber == -1 && kits[it].name.startsWith("EMPTY ")
         }
 
+    // Where a "Load Kit From Folder" / "Import Patch" should land.
+    // BUG FIX (user: "30 me patch load kiya to 43 me save ho gaya"):
+    // firstFreeBankASlot() picks the lowest still-blank slot, which jumps
+    // around as slots fill/empty. The client expects the load to go into the
+    // patch they're currently looking at ("jis kit me load kare wahi set
+    // rahe"). So: use `currentKit` when it's a Bank A slot that isn't one of
+    // the 25 read-only factory kits; otherwise fall back to the first blank.
+    fun targetSlotForLoad(): Int? {
+        val cur = currentKit
+        if (cur in 0 until BANK_A_KIT_CAPACITY && kits[cur].factoryKitNumber == -1) return cur
+        return firstFreeBankASlot()
+    }
+
     // NEW: duplicates kits[index] (all volumes/pitches/EQ/choke groups/custom
     // audio). `intoBankB` = true writes the copy into a free slot inside
     // Bank B's own reserved pool (never appended past it — appending would
@@ -1564,15 +1636,24 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             AudioRepository.copyForKit(index, freeSlot)
             currentKitB = freeSlot
         } else {
-            // Appends past the end — always lands beyond BANK_B_KIT_END
-            // since `kits` never shrinks below BANK_B_KIT_END+1 (see
-            // deleteKit), so this can never collide with Bank B's reserved
-            // range. No hard cap here, same as Import Patch/Load Kit's
-            // existing (uncapped) kits.add() calls.
-            kits.add(newKit)
-            val newIndex = kits.lastIndex
-            AudioRepository.copyForKit(index, newIndex)
-            currentKit = newIndex
+            // BUG FIX: this used to `kits.add(newKit)` — but `kits` is
+            // permanently padded to 400+ entries (Bank A pool 0..199, Bank B
+            // 200..399), so the copy landed at index 400+, OUTSIDE Bank A's
+            // Patch List range (0..199) and outside every `<`/`>`/PC/Note nav
+            // cap. The copied kit was invisible in the list and `currentKit`
+            // jumped to an unreachable slot — read as "COPY does nothing".
+            // Write into the first still-blank slot in Bank A's own pool,
+            // exactly like NEW KIT / Load Kit / Import Patch already do.
+            val freeSlot = firstFreeBankASlot()
+            if (freeSlot == null) {
+                android.widget.Toast.makeText(
+                    context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
+            kits[freeSlot] = newKit
+            AudioRepository.copyForKit(index, freeSlot)
+            currentKit = freeSlot
         }
         persistKits()
     }
@@ -2100,9 +2181,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             RightPanel(
 
                 controlPanelWidth = controlPanelWidth,
-                loopEnabled = loopEnabled,
+                loopEnabled = loopOnForCurrentKit(),
                 onLoopChange = {
-                    loopEnabled = it
+                    setLoopForCurrentKit(it)
 
                     if (!it && currentStreamId != 0) {
                         soundPool.stop(currentStreamId)
@@ -2288,6 +2369,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onKitNext     = { if (currentKit < BANK_A_KIT_CAPACITY - 1) currentKit++ },
                 onOpenKitList = { kitListTargetsBankB = false; showKitList = true },
                 onOpenKitListB = { kitListTargetsBankB = true; showKitList = true },
+                openFxPanelRequest = openFxPanelRequest,
+                openDelayPanelRequest = openDelayPanelRequest,
                 // ── NEW callbacks ──────────────────────────────────────────────
                 onOpenImport = { importTargetPad = null; topPanel = "IMPORT" },
                 onOpenAudios = { topPanel = "AUDIOS" },
@@ -2395,6 +2478,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             kits[freeSlot] = kits[freeSlot].copy(name = generateNextKitName())
                             currentKitB = freeSlot
                             persistKits()
+                            // Close so the user lands on the new kit and can
+                            // see it took effect (was: nothing visibly changed).
+                            showKitList = false
+                        } else {
+                            android.widget.Toast.makeText(
+                                context, "All 200 Bank B kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                            ).show()
                         }
                     } else {
                         // ── NEW: yaha se add kiya gaya kit bhi khaali (-1) pads ke saath banega ──
@@ -2409,6 +2499,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             )
                             currentKit = freeSlot
                             persistKits()   // NEW
+                            showKitList = false
                         } else {
                             android.widget.Toast.makeText(
                                 context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
@@ -2419,7 +2510,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
 
                 onDelete   = { index -> deleteKit(index) },
-                onCopy     = { index -> copyKit(index, intoBankB = kitListTargetsBankB) },
+                onCopy     = { index -> copyKit(index, intoBankB = kitListTargetsBankB); showKitList = false },
                 onRename   = { index ->
                     // Direct/inline patch editing: rename right from the
                     // Patch List instead of needing Settings → Rename Kit.
@@ -2663,7 +2754,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             chokeGroups = entry.chokeGroups.map { levels -> mutableStateListOf<Int>().apply { addAll(levels) } },
                             activeChokeLevelState = mutableStateOf(entry.activeChokeLevel)
                         )
-                        val newKitIndex = firstFreeBankASlot()
+                        val newKitIndex = targetSlotForLoad()
                         if (newKitIndex == null) {
                             android.widget.Toast.makeText(
                                 context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
@@ -2698,7 +2789,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 LoadKitScreen(
                     currentKitCount = kits.size,
                     onKitLoaded = { name, files ->
-                        val newKitIndex = firstFreeBankASlot()
+                        val newKitIndex = targetSlotForLoad()
                       if (newKitIndex == null) {
                         android.widget.Toast.makeText(
                             context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT

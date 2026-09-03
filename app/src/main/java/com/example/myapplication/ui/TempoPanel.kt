@@ -93,11 +93,19 @@ fun TempoPanel(
                     Text("$bpm", color = TempoTextWht, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                     Text("BPM", color = TempoTextMuted, fontSize = 9.sp, letterSpacing = 1.5.sp)
                     Spacer(Modifier.height(10.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        BpmStepButton("-10") { onBpmChange((bpm - 10).coerceIn(40, 300)) }
-                        BpmStepButton("-1")  { onBpmChange((bpm - 1).coerceIn(40, 300)) }
-                        BpmStepButton("+1")  { onBpmChange((bpm + 1).coerceIn(40, 300)) }
-                        BpmStepButton("+10") { onBpmChange((bpm + 10).coerceIn(40, 300)) }
+                    // BUG FIX: these were fixed 40dp-wide buttons with 10dp
+                    // gaps — 4 of them need ~190dp but the panel's content box
+                    // is only ~165dp, so "+10" was clipped off the right edge
+                    // and unreachable ("loop mode me +10 add karna hai"). Now
+                    // they share the row width evenly and always fit.
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        BpmStepButton("-10", Modifier.weight(1f)) { onBpmChange((bpm - 10).coerceIn(40, 300)) }
+                        BpmStepButton("-1",  Modifier.weight(1f)) { onBpmChange((bpm - 1).coerceIn(40, 300)) }
+                        BpmStepButton("+1",  Modifier.weight(1f)) { onBpmChange((bpm + 1).coerceIn(40, 300)) }
+                        BpmStepButton("+10", Modifier.weight(1f)) { onBpmChange((bpm + 10).coerceIn(40, 300)) }
                     }
                 }
             }
@@ -223,13 +231,15 @@ private fun ToggleRow(
 }
 
 @Composable
-private fun BpmStepButton(label: String, onClick: () -> Unit) {
+private fun BpmStepButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
-            .size(width = 40.dp, height = 28.dp)
+        modifier = modifier
+            .widthIn(min = 34.dp)
+            .height(28.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(Color(0xFF2A2A2A))
-            .clickable(remember { MutableInteractionSource() }, null) { onClick() },
+            .clickable(remember { MutableInteractionSource() }, null) { onClick() }
+            .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(label, color = TempoTextWht, fontSize = 9.sp, fontWeight = FontWeight.Bold)

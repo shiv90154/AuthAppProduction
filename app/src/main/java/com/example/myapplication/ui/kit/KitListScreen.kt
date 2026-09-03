@@ -68,7 +68,14 @@ fun KitListScreen(
     // all operate on that real index, not a position within the filtered
     // results, so renaming/selecting/exporting still hits the right kit.
     var searchQuery by remember { mutableStateOf("") }
-    val filteredKits = remember(kits, searchQuery, visibleRange) {
+    // BUG FIX (user: "New kit / copy / delete patch list me kaam nahi kar
+    // raha"): this was `remember(kits, searchQuery, visibleRange) { ... }`.
+    // `kits` is a SnapshotStateList whose *reference* never changes, so
+    // add/copy/delete (which mutate elements in place) never invalidated the
+    // remember key — the list on screen stayed frozen and the actions looked
+    // dead. Computing it inline each recomposition subscribes to the list's
+    // structural changes, so it refreshes the moment a kit is added/replaced.
+    val filteredKits = run {
         val inRange = kits.withIndex().filter { it.index in visibleRange }
         if (searchQuery.isBlank()) inRange
         else inRange.filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }

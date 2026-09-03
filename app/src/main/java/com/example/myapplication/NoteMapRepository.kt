@@ -24,7 +24,10 @@ object NoteMapRepository {
 
     val TARGETS = listOf(
         "PATCH_NEXT", "PATCH_PREV", "EDIT", "SAVE",
-        "DELAY_TOGGLE", "BANK_A", "BANK_B", "BANK_AB"
+        "DELAY_TOGGLE", "BANK_A", "BANK_B", "BANK_AB",
+        // NEW: open/close the FX panel and the MASTER DELAY panel from a
+        // hardware button, same as EDIT already opens the crop editor.
+        "FX", "MASTER_DELAY"
     )
 
     private const val PREFS_NAME = "note_map_prefs"

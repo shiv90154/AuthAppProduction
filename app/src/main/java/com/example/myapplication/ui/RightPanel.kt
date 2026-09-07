@@ -52,7 +52,6 @@ fun RightPanel(
     onKitPrev: () -> Unit,
     onKitNext: () -> Unit,
     onOpenKitList: () -> Unit,
-    onOpenKitListB: () -> Unit = {},
     // NEW: MIDI-note "FX" / "MASTER_DELAY" targets — OctapadScreen increments
     // these counters; each change toggles the matching side panel here.
     openFxPanelRequest: Int = 0,
@@ -86,8 +85,6 @@ fun RightPanel(
     onOpenLoadKit: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenImportPatch: () -> Unit = {},
-    bpm: Int = 120,
-    onBpmChange: (Int) -> Unit = {},
 
     // Delay — its own dedicated top-level panel (DelayPanel.kt), not part of FX
     delayEnabled: Boolean = false,
@@ -141,9 +138,6 @@ fun RightPanel(
     // was active.
     bankMode: String = "A",
     onBankModeSelect: (String) -> Unit = {},
-    kitBName: String = "",
-    onKitBPrev: () -> Unit = {},
-    onKitBNext: () -> Unit = {},
     // Responsive width (see BoxWithConstraints in OctapadScreen) — ~20% of
     // screen width, clamped — instead of one fixed dp tuned for one device.
     controlPanelWidth: Dp = 190.dp
@@ -288,9 +282,7 @@ fun RightPanel(
         ) {
             TempoPanel(
                 width = tempoPanelWidth,
-                bpm = bpm,
                 loopEnabled = loopEnabled,           // MOVED from EQPanel
-                onBpmChange = onBpmChange,
                 onLoopChange = onLoopChange,         // MOVED from EQPanel
                 speed = speed,
                 onSpeedChange = onSpeedChange,
@@ -356,18 +348,12 @@ fun RightPanel(
         // instead, so the trim now adapts per-device rather than only being
         // correct for whatever device it was last tuned against.
         BoxWithConstraints(modifier = Modifier.fillMaxHeight()) {
-        // BUG FIX: the 380dp reference budget below was tuned assuming
-        // Bank A alone — it didn't account for the Bank B kit-selector row
-        // (the "< B: kitname >" row, ~40dp incl. its spacer) that only
-        // renders when Bank B is actually active. On a shorter-height phone
-        // that extra row pushed the "◄ PATCH LIST ►" nav row at the very
-        // bottom past the column's bottom edge, where — since this panel
-        // deliberately has no scroll fallback (see the note above) — it got
-        // clipped/hidden instead of shrinking to fit like everything else.
-        // Folding the same extra height into the reference budget here
-        // makes heightScale shrink a little further whenever Bank B is on,
-        // so the nav row stays on-screen instead of being silently dropped.
-        val bankBExtra = if ('B' in bankMode) 40.dp else 0.dp
+        // The Bank B kit-selector row ("< B: kitname >") was removed — Bank B
+        // is now paired to Bank A's kit number and has no manual selector — so
+        // there is no longer an extra ~40dp row to budget for when Bank B is
+        // active. Kept as a named 0.dp so the heightScale expression below
+        // reads the same as before.
+        val bankBExtra = 0.dp
         // 406dp (was 380) — bumped when the MASTER DELAY bar + its spacer
         // (~26dp) were added to the strip; folding that into the reference
         // budget keeps heightScale shrinking enough that the bottom PATCH
@@ -761,65 +747,13 @@ fun RightPanel(
                 }
             }
 
-            // Bank B kit selector — only shown while Bank B is actually audible
-            if ('B' in bankMode) {
-                Spacer(modifier = Modifier.height(vSpace(4.dp)))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(NavRed)
-                            .pointerInput(Unit) { detectTapGestures { onKitBPrev() } },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("<", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                    Text(
-                        "B: $kitBName",
-                        color = Color(0xFFFFB74D),
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
-                        // BUG FIX: without a bounded width, a long kit name
-                        // pushed this Row past the panel's edge — the ">"
-                        // button on the right could end up clipped off-screen
-                        // entirely, un-tappable. weight(1f) keeps both nav
-                        // buttons always visible regardless of name length.
-                        //
-                        // NEW: Bank B used to only have these < / > step
-                        // buttons — no way to jump straight to a specific
-                        // kit number the way Bank A's PATCH LIST does.
-                        // Tapping the name itself now opens the same
-                        // patch-list screen, targeting Bank B's selection.
-                        modifier = Modifier
-                            .weight(1f)
-                            .pointerInput(Unit) {
-                                detectTapGestures {
-                                    activeBtn = ""
-                                    closeAllPanels()
-                                    onOpenKitListB()
-                                }
-                            }
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(RoundedCornerShape(50))
-                            .background(NavRed)
-                            .pointerInput(Unit) { detectTapGestures { onKitBNext() } },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(">", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold)
-                    }
-                }
-            }
+            // The manual "< B: kitname >" Bank B kit selector that used to
+            // render here (while Bank B was audible) was removed per client
+            // request: Bank B is now permanently paired to Bank A's kit
+            // number, so pressing PATCH/PATCH LIST/< > for Bank A moves Bank B
+            // in lock-step. The LCD name label above already shows the active
+            // bank's kit via bankKitIdx, and OctapadScreen drives currentKitB
+            // from currentKit — nothing to select here anymore.
 
             Spacer(modifier = Modifier.height(vSpace(6.dp)))
 

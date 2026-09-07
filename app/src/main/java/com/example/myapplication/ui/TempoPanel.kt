@@ -29,11 +29,10 @@ private val TempoTextWht   = Color(0xFFEEEEEE)
 
 @Composable
 fun TempoPanel(
-    bpm: Int,
     loopEnabled: Boolean,
-    onBpmChange: (Int) -> Unit,
     onLoopChange: (Boolean) -> Unit,
-    // NEW: global tempo-synced playback-rate multiplier
+    // SPEED is now the ONLY loop-rate control (BPM was removed from the
+    // LOOP panel entirely — client override 2026-09-07).
     speed: Float = 1f,
     onSpeedChange: (Float) -> Unit = {},
     // NEW: per-pad play mode selector, moved here from the FX panel — ONE
@@ -80,42 +79,11 @@ fun TempoPanel(
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
 
-            // ── BPM Display + Stepper ────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(TempoPanelBg)
-                    .padding(vertical = 14.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("$bpm", color = TempoTextWht, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-                    Text("BPM", color = TempoTextMuted, fontSize = 9.sp, letterSpacing = 1.5.sp)
-                    Spacer(Modifier.height(10.dp))
-                    // BUG FIX: these were fixed 40dp-wide buttons with 10dp
-                    // gaps — 4 of them need ~190dp but the panel's content box
-                    // is only ~165dp, so "+10" was clipped off the right edge
-                    // and unreachable ("loop mode me +10 add karna hai"). Now
-                    // they share the row width evenly and always fit.
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        BpmStepButton("-10", Modifier.weight(1f)) { onBpmChange((bpm - 10).coerceIn(40, 300)) }
-                        BpmStepButton("-1",  Modifier.weight(1f)) { onBpmChange((bpm - 1).coerceIn(40, 300)) }
-                        BpmStepButton("+1",  Modifier.weight(1f)) { onBpmChange((bpm + 1).coerceIn(40, 300)) }
-                        BpmStepButton("+10", Modifier.weight(1f)) { onBpmChange((bpm + 10).coerceIn(40, 300)) }
-                    }
-                }
-            }
-
-            Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
-
-            // ── Speed (tempo-synced playback-rate multiplier) ──────────────
-            // Continuous drag knob, same LinearSlider used for VOL/PITCH —
-            // replaces the old -10%/RESET/+10% step buttons, which weren't
-            // direct enough for a live-performance speed adjustment.
+            // ── Speed (the loop-rate control) ─────────────────────────────
+            // Continuous drag knob, same LinearSlider used for VOL/PITCH.
+            // SPEED is the ONLY loop control now — BPM was removed from this
+            // panel. It scales how fast a looping pad retriggers (sample
+            // length ÷ SPEED); it does NOT change pitch.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -138,7 +106,7 @@ fun TempoPanel(
                     BpmStepButton("RESET") { onSpeedChange(1f) }
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Varispeed: plays the sample faster/slower + higher/lower pitched, like the PITCH knob. Independent of BPM.",
+                        "Higher = loop repeats faster, lower = slower. Pitch/tone stays the same.",
                         color = TempoTextMuted, fontSize = 8.sp,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.fillMaxWidth()
@@ -151,14 +119,14 @@ fun TempoPanel(
             // ── Loop toggle ───────────────────────────────────────────────
             ToggleRow(
                 label    = "LOOP",
-                subtitle = if (loopEnabled) "Pad loops at BPM rate" else "Loop is off",
+                subtitle = if (loopEnabled) "Pad repeats at SPEED rate" else "Loop is off",
                 enabled  = loopEnabled,
                 color    = TempoGreen,
                 onClick  = { onLoopChange(!loopEnabled) }
             )
 
             Text(
-                "Loop syncs with BPM — affects all pads. Choke levels are set in the CHOKE panel.",
+                "Loop rate is set by SPEED above — affects this kit's pads. Choke levels are set in the CHOKE panel.",
                 color = TempoTextMuted, fontSize = 8.sp, modifier = Modifier.fillMaxWidth()
             )
 

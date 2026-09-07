@@ -428,24 +428,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // non-scrolling panel whenever it was active) — strip any leftover 'C'
     // from a value persisted before the removal so an old install doesn't
     // come back up in a now-nonexistent bank mode.
-    var currentKitB by remember { mutableStateOf(PreferencesRepository.loadKitB()) }
+    var currentKitB by remember {
+        mutableStateOf(BANK_B_KIT_START + KitRepository.loadLastSelectedKit().coerceIn(0, BANK_A_KIT_CAPACITY - 1))
+    }
     var bankMode by remember { mutableStateOf(PreferencesRepository.loadBankMode().replace("C", "").ifEmpty { "A" }) }
 
     LaunchedEffect(currentKitB) { PreferencesRepository.saveKitB(currentKitB) }
     LaunchedEffect(bankMode)    { PreferencesRepository.saveBankMode(bankMode) }
 
-    // BUG FIX (B bank kit isolation): currentKitB must always point inside
-    // Bank B's own reserved BANK_B_KIT_START..BANK_B_KIT_END range — never
-    // into Bank A's 0..(BANK_A_KIT_CAPACITY-1) range, since `kits` is now
-    // guaranteed (see the `kits = remember {}` block above) to hold at least
-    // BANK_B_KIT_END+1 entries with that upper range permanently reserved
-    // for Bank B. This also migrates installs saved before this fix, whose
-    // persisted currentKitB still points into the old shared 0..199 range
-    // (including the old loadKitB() default of 25) back onto Bank B's own
-    // pool instead of leaving it aliasing whatever Bank A kit used to sit
-    // at that index.
-    LaunchedEffect(Unit) {
-        if (currentKitB !in BANK_B_KIT_START..BANK_B_KIT_END) currentKitB = BANK_B_KIT_START
+    // Bank B is permanently PAIRED to Bank A's kit number (client request,
+    // 2026-09-07: "A bank ka 10 number kit dabau to B bank me bhi automatic
+    // 10 number kit aaye" — and "baar baar set karna padta hai" for the old
+    // manual selector). Selecting Bank A kit N always points Bank B at its
+    // own pool slot N (BANK_B_KIT_START + N). There is no independent Bank B
+    // kit selector anymore — the old "< B: name >" step buttons and the
+    // Bank-B patch-list entry point were removed from RightPanel. Editing
+    // pads while Bank B (or A+B) is active still writes into — and persists —
+    // this paired B-pool slot via bankKitIdx(), so every Bank A patch keeps
+    // its own dedicated Bank B layer that comes back automatically with it.
+    // currentKitB stays a real state var (not derivedStateOf) so the now-dead
+    // `kitListTargetsBankB` branches still compile; it's just never written
+    // anywhere except here now.
+    LaunchedEffect(currentKit) {
+        currentKitB = BANK_B_KIT_START + currentKit.coerceIn(0, BANK_A_KIT_CAPACITY - 1)
     }
 
     // BUG FIX: the pad VOL/PITCH controls (and the matching MIDI CC handlers)
@@ -920,16 +925,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             playbackDurationMs = durationToShow
             playbackPositionMs = 0L
 
-            // SPEED (LOOP panel) now behaves like a pitch/varispeed control —
-            // it multiplies the sample playback rate (higher = faster + higher
-            // pitched, lower = slower + lower pitched), exactly like the PITCH
-            // knob, and is DELIBERATELY independent of BPM. BPM alone controls
-            // the loop retrigger tempo (see the wait-window math below); SPEED
-            // alone controls how the sample itself sounds. They used to be
-            // tangled together (SPEED scaled the loop interval and did nothing
-            // to pitch), which is what read as "speed se tone cut-cut aata
-            // hai" and "bpm loop me kaam nahi karta".
-            val speedPitchMul = speed.coerceIn(0.25f, 4f)
+            // SPEED (LOOP panel) redesign (client override): SPEED is now
+            // ONLY a loop-rate control — it scales how fast a looping pad
+            // retriggers (see the wait-window math below), and does NOT touch
+            // the sample's pitch anymore. The old varispeed behaviour
+            // ("tone/pitch bhi change ho jata tha") was explicitly asked to be
+            // removed — "sirf tone fast ho, pitch change na ho". BPM was also
+            // dropped from the loop entirely; SPEED is the single loop control.
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
                     slot >= 8  -> currentKitB
@@ -939,7 +941,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     DrumEngine.trigger(
                         slot,
                         kits[kitForSlot].volumes[index] * effectiveVelocity,
-                        kits[kitForSlot].pitches[index] * speedPitchMul,
+                        kits[kitForSlot].pitches[index],
                         stopExisting = !allowOverlap,
                         lengthFraction = kits[kitForSlot].padLengthPct.getOrElse(index) { 1f },
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
@@ -965,79 +967,26 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 var keepGoing = true
 
                 while (keepGoing) {
-                    // SPEED (LOOP panel) scales the tempo-synced interval —
-                    // >1x plays the beat grid faster, <1x slower, independent of BPM.
-                    // BUG FIX: this used to divide as Long/Int first (`60_000L
-                    // / bpm`), truncating to a whole millisecond *before* the
-                    // Speed division was ever applied — e.g. at 127 BPM,
-                    // 60000/127 truncates to 472 instead of the true 472.44,
-                    // and every subsequent Speed scaling compounded that
-                    // rounding. Doing the whole calculation in Float first,
-                    // then truncating once at the very end, keeps BPM and
-                    // Speed both accurate instead of BPM silently losing
-                    // precision before Speed ever sees it.
-                    // BPM is now the ONLY thing that sets the loop retrigger
-                    // tempo — SPEED was removed from here and turned into a
-                    // pitch/varispeed control on the sample itself (see fire()
-                    // above). One beat = 60000/BPM ms, floored at 50ms.
-                    val beatIntervalMs = (60_000f / bpm.coerceAtLeast(1)).toLong().coerceAtLeast(50L)
-                    // BUG FIX: per-pad LOOP play mode used to be BPM-gated
-                    // exactly like the global Loop toggle (wait for
-                    // max(beatInterval, duration) before retriggering) — so
-                    // a short sample at a slow BPM played once then sat in
-                    // silence for the rest of the beat before repeating,
-                    // which reads as "loop is broken" (spec asks for LOOP to
-                    // just play continuously the moment it's hit). The
-                    // global Loop toggle is intentionally tempo-synced (the
-                    // Tempo panel says so directly — "Pad loops at BPM
-                    // rate") so that one still uses the BPM-gated window;
-                    // only the explicit per-pad LOOP mode is now a true
-                    // immediate back-to-back loop.
-                    val currentMode = kits[bankKitIdx()].padPlayMode.getOrElse(index) { "ONESHOT" }
-                    // BUG FIX: per-pad LOOP mode used to ignore SPEED entirely
-                    // (always durationToShow, the sample's own raw length) —
-                    // meaning the LOOP panel's SPEED knob had literally zero
-                    // effect unless a pad was ONESHOT *and* the global Loop
-                    // toggle was on, which reads as "Speed control doesn't
-                    // work" for the very common case of testing it against a
-                    // PLAY MODE = LOOP pad. BPM is deliberately NOT applied
-                    // here — re-gating LOOP mode to the beat grid would
-                    // reintroduce the "silence gap" bug fixed above. Only the
-                    // sample's own natural gap is scaled by the playback-
-                    // rate-like SPEED multiplier, same idea as the beat-grid
-                    // scaling above, just applied to LOOP mode's own interval.
-                    // Per-pad LOOP mode = a true gapless back-to-back repeat of
-                    // the sample, NOT beat-gated (beat-gating it reintroduces
-                    // the "bahut time-time me bajta hai" silence gap). Since
-                    // SPEED now actually plays the sample faster/slower (it's a
-                    // pitch multiplier), the real audible length is
-                    // durationToShow / speed — retrigger on that so the repeat
-                    // stays seamless at any SPEED.
-                    // BUG FIX (user reports, 2026-09-03):
-                    //  (a) "BPM loop mode me kaam nahi karta, one-shot me karta
-                    //      hai" — BPM used to gate only the global-toggle case;
-                    //      per-pad PLAY MODE = LOOP ignored it entirely.
-                    //  (b) "speed badhane par loop cut jata hai, poora tone
-                    //      play nahi hota" — a sample longer than the retrigger
-                    //      window got chopped mid-playback every repeat.
-                    // Both loop cases now use the SAME window:
-                    //     maxOf(beatIntervalMs, audibleLenMs)
-                    // where audibleLenMs is the sample's REAL playing length
-                    // after SPEED (SPEED is a pitch/varispeed multiplier in
-                    // fire(), so a 2x-speed sample truly finishes in half the
-                    // wall-clock time). maxOf guarantees the sample is never
-                    // cut (window >= its audible length) AND that BPM still
-                    // sets the tempo whenever the beat is longer than the
-                    // sample. A short sample at a slow BPM now leaves a
-                    // rhythmic gap between repeats — that is intended: the
-                    // client explicitly asked for BPM to drive LOOP mode too.
-                    val audibleLenMs = (durationToShow / speed.coerceIn(0.25f, 4f))
+                    // LOOP-panel redesign (client override, 2026-09-07):
+                    // SPEED is now the ONE and ONLY loop-rate control. BPM was
+                    // removed from the loop math entirely (and from the LOOP
+                    // panel UI) — "loop k liye bas speed rakhna hai". SPEED no
+                    // longer touches pitch either (see fire() above) — "sirf
+                    // tone fast ho, pitch change na ho".
+                    //
+                    // The retrigger interval is simply the pad's own sliced
+                    // sample length divided by SPEED:
+                    //   SPEED > 1  → repeats faster (sample cut short) = groove
+                    //               speeds up, pitch unchanged
+                    //   SPEED = 1  → seamless back-to-back at the sample's
+                    //               natural length ("loop turant pakadta hai")
+                    //   SPEED < 1  → slower repeat, short rhythmic gap after
+                    //               the sample finishes
+                    // No maxOf(beatInterval, …) floor anymore — that floor was
+                    // exactly what made the loop "late se start" at slow BPM.
+                    val loopIntervalMs = (durationToShow / speed.coerceIn(0.25f, 4f))
                         .toLong().coerceAtLeast(50L)
-                    val waitWindowMs = when {
-                        currentMode == "LOOP" -> maxOf(beatIntervalMs, audibleLenMs)
-                        effectiveLoop()       -> maxOf(beatIntervalMs, audibleLenMs)
-                        else                  -> durationToShow
-                    }
+                    val waitWindowMs = if (effectiveLoop()) loopIntervalMs else durationToShow
 
                     val startTime = System.currentTimeMillis()
                     var elapsed = 0L
@@ -1065,7 +1014,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         if (latestHitToken == myToken) {
                             playbackPositionMs = elapsed.coerceAtMost(durationToShow)
                         }
-                        delay(50)
+                        // Tighter poll (was 50ms) so a loop retriggers within
+                        // ~15ms of the sample ending instead of up to a frame
+                        // late — part of the "loop turant nahi pakadta" fix.
+                        delay(15)
                     }
 
                     if (latestHitToken == myToken) {
@@ -1391,8 +1343,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 cc.getCc("PITCH") -> {
                     val newPitch = 0.5f + normalized * 1.5f
                     kits[bankKitIdx()].pitches[selectedPad] = newPitch
-                    val p = newPitch * speed.coerceIn(0.25f, 4f)  // match fire()'s varispeed
-                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, p) }
+                    // SPEED no longer affects pitch (varispeed removed) — push
+                    // the raw pitch, same as fire() now does.
+                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, newPitch) }
                     persistKitsDebounced()
                 }
 
@@ -2190,8 +2143,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         currentStreamId = 0
                     }
                 },
-                bpm = bpm,
-                onBpmChange = { bpm = it },
                 velocityOn = velocityOn,
                 onVelocityChange = { velocityOn = it },
                 // NEW: pass ALL pads' choke-group membership (not just selected pad)
@@ -2301,11 +2252,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // assignment now that RightPanel handles which button was
                 // tapped (no more toggle-membership logic needed here).
                 onBankModeSelect = { mode -> bankMode = mode },
-                kitBName = if (currentKitB in kits.indices) kits[currentKitB].name else "",
-                // Bank B stepping stays inside its own reserved
-                // BANK_B_KIT_START..BANK_B_KIT_END pool — never Bank A's.
-                onKitBPrev = { if (currentKitB > BANK_B_KIT_START) currentKitB-- },
-                onKitBNext = { if (currentKitB < BANK_B_KIT_END) currentKitB++ },
+                // Bank B has no manual kit selector anymore — it is paired to
+                // Bank A's kit number (see the LaunchedEffect(currentKit) that
+                // drives currentKitB near the bankMode declaration).
                 selectedPad = selectedPad,
                 // BUG FIX: read/write the kit for the CURRENTLY SELECTED BANK
                 // (bankKitIdx()), not always Bank A's currentKit — see the
@@ -2318,9 +2267,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // so dragging the on-screen VOL/PITCH slider did nothing to a
                 // currently sounding / looping pad — it only took effect on
                 // the NEXT hit. Pan/Gain/EQ sliders and the MIDI-knob path
-                // all push to native live; VOL/PITCH now do too. Pitch is
-                // multiplied by SPEED to match fire()'s varispeed handling so
-                // a live drag and the next retrigger agree.
+                // all push to native live; VOL/PITCH now do too. (SPEED no
+                // longer scales pitch — varispeed was removed — so PITCH goes
+                // to native raw.)
                 onVolumeChange = { v ->
                     kits[bankKitIdx()].volumes[selectedPad] = v
                     nativeSlotsFor(selectedPad).forEach { DrumEngine.setVolume(it, v) }
@@ -2329,8 +2278,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 onPitchChange = { v ->
                     kits[bankKitIdx()].pitches[selectedPad] = v
-                    val p = v * speed.coerceIn(0.25f, 4f)
-                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, p) }
+                    nativeSlotsFor(selectedPad).forEach { DrumEngine.setPitch(it, v) }
                     persistKitsDebounced()
                 },
                 kits          = kits,
@@ -2368,7 +2316,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // through the Patch List's search, just not via +/- stepping.
                 onKitNext     = { if (currentKit < BANK_A_KIT_CAPACITY - 1) currentKit++ },
                 onOpenKitList = { kitListTargetsBankB = false; showKitList = true },
-                onOpenKitListB = { kitListTargetsBankB = true; showKitList = true },
                 openFxPanelRequest = openFxPanelRequest,
                 openDelayPanelRequest = openDelayPanelRequest,
                 // ── NEW callbacks ──────────────────────────────────────────────

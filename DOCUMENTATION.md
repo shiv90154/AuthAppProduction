@@ -308,6 +308,26 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**Bank B is now permanently paired to Bank A's kit number (2026-09-07)**
+
+Client feedback (Hindi): "B bank se ye [manual selector] htwa do — B bank me patch banane ke baad baar baar set karna padta hai. Niche ke next/previous button se hi B bank change ho. A bank ka 10 number kit dabau to B bank me bhi automatic 10 number kit aaye." The old workflow forced the user to re-pick the Bank B kit every time they changed the Bank A patch.
+
+- **Removed the manual Bank B kit selector** — the "`< B: kitname >`" row in `RightPanel.kt` (step buttons + tap-name-to-open-patch-list) is gone, along with its params (`kitBName`/`onKitBPrev`/`onKitBNext`/`onOpenKitListB`) and the `bankBExtra` height budget it needed.
+- **`currentKitB` is driven from `currentKit`**: `LaunchedEffect(currentKit) { currentKitB = BANK_B_KIT_START + currentKit.coerceIn(0, BANK_A_KIT_CAPACITY - 1) }`. Bank A kit index N always pairs with Bank B pool slot N (displayed "EMPTY B 0NN" — numbers line up). Bank A's `<`/`>`/PATCH LIST/MIDI PC nav now moves Bank B in lock-step; there is no independent Bank B navigation.
+- Bank B is still a real, separately-persisted 200-slot pool (`BANK_B_KIT_START..BANK_B_KIT_END`) — editing pads while Bank B or A+B is active still writes into the paired B-pool slot via `bankKitIdx()` and persists, so each Bank A patch keeps its own dedicated Bank B layer that comes back automatically.
+- `currentKitB` stays a `var` (not `derivedStateOf`) and the now-unreachable `kitListTargetsBankB == true` branches in the KitListScreen overlay are left in place (dead, compile-only). `firstFreeBankBSlot()` / `copyKit(intoBankB = true)` are likewise now dead.
+- Not built/tested here (no SDK/NDK) — unverified until an on-device build.
+
+**User bug-report batch: SPEED is the only loop control, BPM + varispeed removed (2026-09-07)**
+
+Client feedback (Hindi), reversing most of batch #2 below: "sabhi patch me loop ka speed work krta hai, loop k liye bas speed rakhna hai" / "loop mode me tempo kaam nahi krta" / "speed me sayad pitch change hota hai, isko hta k sirf tone fast ho" / "loop pick turant nahi pakadta, late se loop start hota hai". Offered a real pitch-preserving time-stretch (native DSP); client chose the retrigger-rate approach.
+
+- **SPEED no longer changes pitch (varispeed removed).** `fire()` triggered voices at `kits[...].pitches[index] * speed` — now just `kits[...].pitches[index]`. The two sites that mirrored the old varispeed for live agreement (the `PITCH` MIDI-CC handler and the on-screen `onPitchChange` slider) push raw pitch too.
+- **SPEED is the sole loop-rate control; BPM dropped from the loop math.** The retrigger window is now `loopIntervalMs = durationToShow / speed.coerceIn(0.25f, 4f)` (floored 50ms) for every looping case — no `beatIntervalMs`, no `maxOf` floor. SPEED > 1 repeats faster (cuts a long sample short — that is the requested "tone fast ho"); SPEED = 1 is seamless back-to-back; SPEED < 1 leaves a gap. Removing the `maxOf(beatInterval, …)` floor is also what fixes "loop turant nahi pakadta" — that floor made repeats wait out a full beat at slow BPM.
+- **BPM removed from the LOOP panel UI.** `TempoPanel.kt` lost its BPM display + `-10/-1/+1/+10` steppers; `bpm`/`onBpmChange` params dropped from `TempoPanel` and `RightPanel`. The `bpm` state var, `PreferencesRepository.loadBpm/saveBpm`, and the backup `KEY_BPM` field are kept (unread by any UI) so existing backups still round-trip.
+- **Loop poll tightened** from `delay(50)` to `delay(15)` in the wait loop so a repeat fires within ~15ms of the sample ending.
+- Not built/tested here (no SDK/NDK) — unverified until an on-device build.
+
 **User bug-report batch #2: per-kit LOOP, loop cut-off + BPM, BPM +10 button, patch-load slot, patch-list actions (2026-09-03)**
 
 Follow-up after the client re-tested the batch below.

@@ -280,7 +280,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     var delayMasterEnabled by remember { mutableStateOf(PreferencesRepository.loadDelayEnabled()) }
     // NEW: LOOP group's SPEED control — global tempo-synced playback-rate
     // multiplier (0.5x..2x), separate from BPM.
-    var speed by remember { mutableStateOf(PreferencesRepository.loadSpeed()) }
+    // SPEED is a fine-tune multiplier around BPM now (0.9x–1.1x) — clamp any
+    // value persisted under the old wider 0.5x–2x range so it lands in-panel.
+    var speed by remember { mutableStateOf(PreferencesRepository.loadSpeed().coerceIn(0.9f, 1.1f)) }
     // delayLevel (decay factor) is fixed at 0.5 — controlled by EQ panel's DLY TIME knob per pad
 
     // EQ state is now stored per-pad inside Kit.padLevels / padEqLow / padEqMid / padEqHigh / padDelayMs
@@ -967,26 +969,24 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 var keepGoing = true
 
                 while (keepGoing) {
-                    // LOOP-panel redesign (client override, 2026-09-07):
-                    // SPEED is now the ONE and ONLY loop-rate control. BPM was
-                    // removed from the loop math entirely (and from the LOOP
-                    // panel UI) — "loop k liye bas speed rakhna hai". SPEED no
-                    // longer touches pitch either (see fire() above) — "sirf
-                    // tone fast ho, pitch change na ho".
+                    // Loop tempo (client override, 2026-09-08): BPM is back as
+                    // the base beat rate; SPEED is a fine-tune multiplier
+                    // around it (0.9x–1.1x, clamped here too). SPEED does NOT
+                    // touch pitch — that's the PITCH knob's job now (varispeed
+                    // stays removed, see fire()).
                     //
-                    // The retrigger interval is simply the pad's own sliced
-                    // sample length divided by SPEED:
-                    //   SPEED > 1  → repeats faster (sample cut short) = groove
-                    //               speeds up, pitch unchanged
-                    //   SPEED = 1  → seamless back-to-back at the sample's
-                    //               natural length ("loop turant pakadta hai")
-                    //   SPEED < 1  → slower repeat, short rhythmic gap after
-                    //               the sample finishes
-                    // No maxOf(beatInterval, …) floor anymore — that floor was
-                    // exactly what made the loop "late se start" at slow BPM.
-                    val loopIntervalMs = (durationToShow / speed.coerceIn(0.25f, 4f))
-                        .toLong().coerceAtLeast(50L)
-                    val waitWindowMs = if (effectiveLoop()) loopIntervalMs else durationToShow
+                    // beatIntervalMs = 60000 / BPM / SPEED. The
+                    // maxOf(beatIntervalMs, durationToShow) floor guarantees a
+                    // sample longer than one beat is never cut mid-playback —
+                    // the loop just repeats at the sample's own length. A short
+                    // sample at a slow BPM leaves a rhythmic gap between
+                    // repeats; that is what BPM-synced looping is, and what the
+                    // client asked to keep ("BPM remove nahi karna tha").
+                    val beatIntervalMs =
+                        (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f))
+                            .toLong().coerceAtLeast(50L)
+                    val waitWindowMs =
+                        if (effectiveLoop()) maxOf(beatIntervalMs, durationToShow) else durationToShow
 
                     val startTime = System.currentTimeMillis()
                     var elapsed = 0L
@@ -2134,6 +2134,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             RightPanel(
 
                 controlPanelWidth = controlPanelWidth,
+                bpm = bpm,
+                onBpmChange = { bpm = it },
                 loopEnabled = loopOnForCurrentKit(),
                 onLoopChange = {
                     setLoopForCurrentKit(it)

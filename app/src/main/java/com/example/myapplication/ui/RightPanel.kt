@@ -32,6 +32,32 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.clickable
+
+// ── PITCH as musical semitones ────────────────────────────────────────────
+// The pad PITCH value is a playback-rate multiplier (0.5x..2x). Musicians
+// think in semitones, so the PITCH control shows a note name + semitone
+// offset (unity 1.00x = "C 0", +1 st = "C#", -1 st = "B -1", …) and steps
+// in ±1 / ±10 semitones like the BPM stepper. 0.5x = -12 st, 2x = +12 st.
+private val PITCH_NOTE_NAMES =
+    listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+
+private fun pitchToSemitones(p: Float): Int =
+    Math.round(12.0 * (Math.log(p.toDouble().coerceIn(0.25, 4.0)) / Math.log(2.0))).toInt()
+
+private fun semitonesToPitch(st: Int): Float =
+    Math.pow(2.0, st.coerceIn(-12, 12) / 12.0).toFloat()
+
+private fun semitoneLabel(st: Int): String {
+    val name = PITCH_NOTE_NAMES[((st % 12) + 12) % 12]
+    val sign = when {
+        st > 0 -> "+$st"
+        st < 0 -> "$st"
+        else   -> "0"
+    }
+    return "$name $sign"
+}
 
 @Composable
 fun RightPanel(
@@ -85,6 +111,8 @@ fun RightPanel(
     onOpenLoadKit: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
     onOpenImportPatch: () -> Unit = {},
+    bpm: Int = 120,
+    onBpmChange: (Int) -> Unit = {},
 
     // Delay — its own dedicated top-level panel (DelayPanel.kt), not part of FX
     delayEnabled: Boolean = false,
@@ -282,6 +310,8 @@ fun RightPanel(
         ) {
             TempoPanel(
                 width = tempoPanelWidth,
+                bpm = bpm,
+                onBpmChange = onBpmChange,
                 loopEnabled = loopEnabled,           // MOVED from EQPanel
                 onLoopChange = onLoopChange,         // MOVED from EQPanel
                 speed = speed,
@@ -677,10 +707,49 @@ fun RightPanel(
                                 onValueChange = onPitchChange,
                                 min = 0.5f,
                                 max = 2f,
-                                displayText = "${"%.2f".format(padPitch)}x",
+                                // Shown as a musical note + semitone offset
+                                // instead of a raw "1.00x" multiplier.
+                                displayText = semitoneLabel(pitchToSemitones(padPitch)),
                                 accentColor = Color(0xFFFFB74D),
                                 trackHeight = sliderTrackH
                             )
+                        }
+                    }
+
+                    // ── PITCH semitone stepper (−10 / −1 / +1 / +10) ──────
+                    // Same 4-button pattern as the BPM stepper. Steps the
+                    // pad's pitch by whole semitones; clamped to ±12 st
+                    // (0.5x..2x). Live-updates the sounding pad via
+                    // onPitchChange, exactly like the slider.
+                    run {
+                        val st = pitchToSemitones(padPitch)
+                        Spacer(Modifier.height(vSpace(3.dp)))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PitchStepButton("-10", Modifier.weight(1f)) {
+                                onPitchChange(semitonesToPitch(st - 10))
+                            }
+                            PitchStepButton("-1", Modifier.weight(1f)) {
+                                onPitchChange(semitonesToPitch(st - 1))
+                            }
+                            Text(
+                                semitoneLabel(st),
+                                color = Color(0xFFFFB74D),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                modifier = Modifier.weight(1.3f)
+                            )
+                            PitchStepButton("+1", Modifier.weight(1f)) {
+                                onPitchChange(semitonesToPitch(st + 1))
+                            }
+                            PitchStepButton("+10", Modifier.weight(1f)) {
+                                onPitchChange(semitonesToPitch(st + 10))
+                            }
                         }
                     }
                 }
@@ -833,6 +902,22 @@ private fun MenuOption(icon: String, label: String, color: Color, onClick: () ->
     ) {
         Text(icon, fontSize = 12.sp)
         Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+// Compact semitone step button for the PITCH control (mirrors the BPM
+// stepper's look, sized down for the narrow VOL/PITCH strip).
+@Composable
+private fun PitchStepButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(22.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .background(Color(0xFF2A2A2A))
+            .clickable(remember { MutableInteractionSource() }, null) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = Color(0xFFEEEEEE), fontSize = 8.sp, fontWeight = FontWeight.Bold)
     }
 }
 

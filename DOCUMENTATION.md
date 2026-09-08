@@ -318,6 +318,17 @@ Client feedback (Hindi): "B bank se ye [manual selector] htwa do — B bank me p
 - `currentKitB` stays a `var` (not `derivedStateOf`) and the now-unreachable `kitListTargetsBankB == true` branches in the KitListScreen overlay are left in place (dead, compile-only). `firstFreeBankBSlot()` / `copyKit(intoBankB = true)` are likewise now dead.
 - Not built/tested here (no SDK/NDK) — unverified until an on-device build.
 
+**User bug-report batch: BPM restored as loop base, SPEED = fine-tune, PITCH in semitones (2026-09-08)**
+
+Client feedback (Hindi): "Speed aawaj same rahega sirf speed badega" (SPEED = tempo only, keep), "Pitch me aawaj badal jaayega" + "A# B# C# aisa … saath hi -1/-10/+1/+10 bhi dalna" (PITCH = musical, notes + steppers), "BPM wale remove nahi karna tha, thoda thik karna tha".
+
+- **BPM restored to the LOOP panel** — display + `-10/-1/+1/+10` steppers back in `TempoPanel.kt`; `bpm`/`onBpmChange` re-threaded `OctapadScreen → RightPanel → TempoPanel`.
+- **SPEED demoted to a fine-tune multiplier around BPM.** Slider range `0.9x–1.1x` (was `0.5–2`). Loop math: `beatIntervalMs = 60000 / bpm / speed.coerceIn(0.9,1.1)`, then `waitWindowMs = maxOf(beatIntervalMs, durationToShow)` for every looping case — the "never cut the sample" floor is back. `speed` is clamped into `0.9..1.1` on load so old persisted values snap in-range.
+- **SPEED still does not change pitch** — the 2026-09-07 varispeed removal stays.
+- **PITCH shown as musical semitones.** `RightPanel.kt` gains `pitchToSemitones` / `semitonesToPitch` / `semitoneLabel` (unity `1.00x` = "C 0", ±12 st = 0.5x/2x). The PITCH slider's readout is the note label; a new `-10/-1/+1/+10` semitone stepper row (`PitchStepButton`) under the VOL/PITCH sliders steps whole semitones (clamped ±12), live-updating via the existing `onPitchChange`.
+- `delay(15)` loop poll kept.
+- Not built/tested here (no SDK/NDK) — unverified until an on-device build.
+
 **User bug-report batch: SPEED is the only loop control, BPM + varispeed removed (2026-09-07)**
 
 Client feedback (Hindi), reversing most of batch #2 below: "sabhi patch me loop ka speed work krta hai, loop k liye bas speed rakhna hai" / "loop mode me tempo kaam nahi krta" / "speed me sayad pitch change hota hai, isko hta k sirf tone fast ho" / "loop pick turant nahi pakadta, late se loop start hota hai". Offered a real pitch-preserving time-stretch (native DSP); client chose the retrigger-rate approach.

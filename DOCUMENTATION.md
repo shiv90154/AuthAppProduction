@@ -308,6 +308,16 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**`MASTER_DELAY` MIDI note now toggles the master kill switch (2026-09-09)**
+
+Client (Hindi): "MIDI me master delay pehle on/off ho raha tha, ab nahi — paid ki button se sirf delay folder (per-pad) on ho raha hai, master wala nahi." Verified — the report is accurate:
+
+- `DELAY_TOGGLE` (both the MIDI note and the older CC target) only ever flipped the **selected pad's** `padDelayEnabled` flag via `toggleCurPadDelayEnabled()`. That is the "single / folder" toggle the client saw still working.
+- `MASTER_DELAY` (added 2026-09-03) only ever **opened the DELAY panel** (`openDelayPanelRequest++`). Nothing in the MIDI path touched the global `delayMasterEnabled` kill switch — it could only be flipped by tapping the on-screen "MASTER DELAY: ON/OFF" bar. So from a hardware button there was no way to mute/unmute delay globally.
+- **Fix:** `MASTER_DELAY`'s note handler now does `delayMasterEnabled = !delayMasterEnabled` directly. Safe from the long-lived `LaunchedEffect(Unit)` note handler because `delayMasterEnabled` is a remembered `mutableStateOf` delegate (stable reference), not a per-recomposition `val` — this is *not* the stale-capture shape that caused the old `DELAY_TOGGLE` only-turns-on bug. The `LaunchedEffect(delayMasterEnabled)` that persists it via `PreferencesRepository.saveDelayEnabled` still fires, and the effective state pushed to native stays `padDelayEnabled && delayMasterEnabled`.
+- `openDelayPanelRequest` + its `RightPanel` `LaunchedEffect` are left in place (now unincremented) in case a "open the DELAY panel from a button" target is wanted later.
+- Not built/tested here (no SDK/NDK) — unverified until an on-device build.
+
 **Bank B is now permanently paired to Bank A's kit number (2026-09-07)**
 
 Client feedback (Hindi): "B bank se ye [manual selector] htwa do — B bank me patch banane ke baad baar baar set karna padta hai. Niche ke next/previous button se hi B bank change ho. A bank ka 10 number kit dabau to B bank me bhi automatic 10 number kit aaye." The old workflow forced the user to re-pick the Bank B kit every time they changed the Bank A patch.

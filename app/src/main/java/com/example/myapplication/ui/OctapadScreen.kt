@@ -1444,7 +1444,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
 
                 nm.getNote("MASTER_DELAY") -> {
-                    openDelayPanelRequest++
+                    // Flip the global MASTER DELAY kill switch on/off. This is
+                    // safe to read+write from this long-lived LaunchedEffect(Unit)
+                    // handler because `delayMasterEnabled` is a remembered
+                    // mutableStateOf delegate (stable across recompositions),
+                    // unlike the per-recomposition `curPadDelayEnabled` val that
+                    // caused the old DELAY_TOGGLE only-turns-on bug.
+                    delayMasterEnabled = !delayMasterEnabled
                 }
             }
         }

@@ -63,9 +63,14 @@ object PreferencesRepository {
         prefs()?.edit()?.putString(KEY_LOOP_ENABLED_KITS, indices.sorted().joinToString(","))?.apply()
     }
 
-    fun loadLoopEnabledKits(): Set<Int> {
-        val raw = prefs()?.getString(KEY_LOOP_ENABLED_KITS, null)
-        if (raw == null) return emptySet()
+    // Returns null when the per-kit LOOP list has never been written (a fresh
+    // install, or one that predates per-kit LOOP) — the caller uses that to
+    // decide whether to run the one-time migration from the old global flag.
+    // An explicit empty result (all kits toggled back off) is `emptySet()`,
+    // NOT null — collapsing the two made the migration re-run on every launch
+    // and silently turned LOOP back on for kit 0.
+    fun loadLoopEnabledKits(): Set<Int>? {
+        val raw = prefs()?.getString(KEY_LOOP_ENABLED_KITS, null) ?: return null
         return raw.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet()
     }
 

@@ -73,12 +73,19 @@ fun KitListScreen(
     // `kits` is a SnapshotStateList whose *reference* never changes, so
     // add/copy/delete (which mutate elements in place) never invalidated the
     // remember key — the list on screen stayed frozen and the actions looked
-    // dead. Computing it inline each recomposition subscribes to the list's
-    // structural changes, so it refreshes the moment a kit is added/replaced.
-    val filteredKits = run {
-        val inRange = kits.withIndex().filter { it.index in visibleRange }
-        if (searchQuery.isBlank()) inRange
-        else inRange.filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }
+    // dead. `derivedStateOf` reads the list (and searchQuery) inside its
+    // block, so it subscribes to the list's structural changes AND to the
+    // query, recomputing only when one of those actually changes — not the
+    // O(400) withIndex().filter() on every unrelated recomposition (search
+    // keystroke elsewhere, highlight change, animation frame) that a plain
+    // inline `run { }` did. Keyed on visibleRange since that's a param, not
+    // snapshot state.
+    val filteredKits by remember(visibleRange) {
+        derivedStateOf {
+            val inRange = kits.withIndex().filter { it.index in visibleRange }
+            if (searchQuery.isBlank()) inRange
+            else inRange.filter { (_, kit) -> kit.name.contains(searchQuery, ignoreCase = true) }
+        }
     }
 
     // Full screen dark overlay

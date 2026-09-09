@@ -173,12 +173,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     val loopEnabledKits = remember {
         mutableStateListOf<Int>().apply {
             val saved = PreferencesRepository.loadLoopEnabledKits()
-            when {
-                saved.isNotEmpty() -> addAll(saved)
+            if (saved != null) {
+                // Per-kit list exists (even if empty) — it's authoritative.
+                addAll(saved)
+            } else {
                 // One-time migration: an install that only ever had the old
                 // global LOOP flag on carries it over onto kit 0 so LOOP
-                // isn't silently lost on upgrade.
-                PreferencesRepository.loadLoopEnabled() -> add(0)
+                // isn't silently lost on upgrade. Persist the result right
+                // away (and clear the old flag) so this branch never runs
+                // again — otherwise turning kit 0's LOOP back off left the
+                // list empty === "never saved", re-migrating on every launch.
+                if (PreferencesRepository.loadLoopEnabled()) add(0)
+                PreferencesRepository.saveLoopEnabledKits(this.toSet())
+                PreferencesRepository.saveLoopEnabled(false)
             }
         }
     }
@@ -1014,10 +1021,14 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         if (latestHitToken == myToken) {
                             playbackPositionMs = elapsed.coerceAtMost(durationToShow)
                         }
-                        // Tighter poll (was 50ms) so a loop retriggers within
-                        // ~15ms of the sample ending instead of up to a frame
-                        // late — part of the "loop turant nahi pakadta" fix.
-                        delay(15)
+                        // Adaptive poll: coarse (40ms) while there's still real
+                        // time left on the wait, tight (12ms) only in the final
+                        // stretch so a loop still retriggers within ~12ms of the
+                        // sample ending ("loop turant nahi pakadta" fix) WITHOUT
+                        // burning a 15ms wakeup for the whole interval — matters
+                        // for a held PLAY MODE = LOOP pad, whose wait re-runs
+                        // back-to-back for as long as it's left holding.
+                        delay(if (target - elapsed > 60L) 40L else 12L)
                     }
 
                     if (latestHitToken == myToken) {
@@ -1550,11 +1561,15 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // firstFreeBankASlot() picks the lowest still-blank slot, which jumps
     // around as slots fill/empty. The client expects the load to go into the
     // patch they're currently looking at ("jis kit me load kare wahi set
-    // rahe"). So: use `currentKit` when it's a Bank A slot that isn't one of
-    // the 25 read-only factory kits; otherwise fall back to the first blank.
+    // rahe"). So: use `currentKit` when it's a *still-blank* Bank A slot;
+    // otherwise fall back to the first blank so a load never silently
+    // overwrites a factory kit OR a kit the user has already built.
     fun targetSlotForLoad(): Int? {
         val cur = currentKit
-        if (cur in 0 until BANK_A_KIT_CAPACITY && kits[cur].factoryKitNumber == -1) return cur
+        if (cur in 0 until BANK_A_KIT_CAPACITY &&
+            kits[cur].factoryKitNumber == -1 &&
+            kits[cur].name.startsWith("EMPTY ")
+        ) return cur
         return firstFreeBankASlot()
     }
 

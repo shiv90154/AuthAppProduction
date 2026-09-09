@@ -12,6 +12,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1012,6 +1013,18 @@ fun LinearSlider(
                         onValueChange(min + f * (max - min))
                     }
                     awaitEachGesture {
+                        // Claim the pointer on the very first down and keep
+                        // consuming every move until release. Consuming the
+                        // initial down is what stops the ancestor
+                        // `verticalScroll` (RightPanel's main column, EQ/LOOP/
+                        // DELAY/CHOKE panels) from winning touch arbitration on
+                        // a slightly-diagonal drag and yanking the gesture away
+                        // mid-adjust — the old "consume only while pressed"
+                        // form still let a near-vertical drag scroll the panel
+                        // instead of moving the slider.
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        applyAtY(down.position.y)
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull() ?: continue
@@ -1019,6 +1032,7 @@ fun LinearSlider(
                                 applyAtY(change.position.y)
                                 change.consume()
                             } else {
+                                change.consume()
                                 break
                             }
                         }

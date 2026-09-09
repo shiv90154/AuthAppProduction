@@ -308,6 +308,18 @@ npm run build       # production build check
 
 ## 4. Changelog
 
+**Post-review bug batch: LOOP migration, load-slot overwrite, slider drag, loop poll, patch-list filter (2026-09-09)**
+
+Full-project review pass after the `MASTER_DELAY` fix. Five issues found, all fixed:
+
+- **Per-kit LOOP re-enabled itself on kit 0 every launch** for users who upgraded from the old global LOOP flag. `PreferencesRepository.loadLoopEnabledKits()` returned `emptySet()` for *both* "never saved" (key absent) and "saved, all kits off" (empty string) — so once such a user turned kit 0's LOOP back off, the list serialized to `""`, was read back as `emptySet()`, the one-time migration re-ran, `loadLoopEnabled()` was still `true`, and `add(0)` fired again. Fixed: `loadLoopEnabledKits()` now returns `Set<Int>?` (null = never saved), the migration branch persists its result immediately *and* clears the old `KEY_LOOP_ENABLED` flag so it can only run once.
+- **`targetSlotForLoad()` overwrote a populated user-built kit.** It returned `currentKit` whenever `factoryKitNumber == -1`, but that's true for every user kit, not just blank ones — so Load Kit / Import Patch while viewing a kit you'd built silently replaced it. Now also requires `name.startsWith("EMPTY ")` (same test `firstFreeBankASlot()` uses); a non-blank current slot falls back to the first free blank, matching the long-standing pre-2026-09-03 behavior.
+- **VOL/PITCH `LinearSlider` drag could be stolen by the parent `verticalScroll`.** After `RightPanel`'s main column got a scroll fallback, the sliders sit inside a scrollable and a near-vertical drag lost arbitration mid-adjust. The gesture now consumes `awaitFirstDown()` before the move loop, claiming the pointer so the ancestor scroll can't yank it.
+- **Loop retrigger poll `delay(15)` ran flat-out for the whole wait**, ~3.3× the old `delay(50)` idle wakeups — noticeable for a held PLAY MODE = LOOP pad whose wait re-runs back-to-back indefinitely. Now adaptive: `delay(40)` while there's real time left, `delay(12)` only in the final 60ms, keeping the tight retrigger latency without the constant wakeups.
+- **`KitListScreen`'s `filteredKits` recomputed an O(400) `withIndex().filter()` on every recomposition** (every search keystroke, highlight change, animation frame) after the inline-`run{}` fix for the frozen-list bug. Wrapped in `derivedStateOf` — still subscribes to the `SnapshotStateList`'s structural changes and to `searchQuery`, but only recomputes when one of those actually changes.
+
+Not built/tested here (no SDK/NDK) — unverified until an on-device build.
+
 **`MASTER_DELAY` MIDI note now toggles the master kill switch (2026-09-09)**
 
 Client (Hindi): "MIDI me master delay pehle on/off ho raha tha, ab nahi — paid ki button se sirf delay folder (per-pad) on ho raha hai, master wala nahi." Verified — the report is accurate:

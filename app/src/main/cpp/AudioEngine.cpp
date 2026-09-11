@@ -8,6 +8,98 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 // ─────────────────────────────────────────────────────────────────────────────
+// WSOLA time-stretch (client request: "BPM me tone ki quality same rahe, sirf
+// speed/duration badle" — a pitch-preserving stretch, distinct from the PITCH
+// knob's varispeed which deliberately changes both). Classic
+// Waveform-Similarity Overlap-Add: analysis frames are windowed (Hann) and
+// overlap-added at a synthesis hop that differs from the analysis hop by
+// `ratio`, so the OUTPUT length is ~input length * ratio while every frame's
+// own pitch content is untouched. The "waveform similarity" part is the small
+// +-maxShift search per frame for the analysis offset whose overlap region
+// best correlates with what's already been written — without it, plain OLA
+// phase-cancels at the seams and buzzes; this reduces (not eliminates) that.
+//
+// Known limitation, disclosed to the client up front: WSOLA is a time-domain
+// technique and is well documented to smear sharp transients (exactly what
+// most drum/percussion one-shots are) more than it does sustained/tonal
+// material — there is no artifact-free way to time-stretch a transient
+// without a phase vocoder or a much heavier algorithm, which is out of scope
+// here. This is "best effort" per that explicit trade-off discussion.
+static std::vector<float> wsolaStretch(const std::vector<float>& input, int channels,
+                                        int sampleRate, float ratio) {
+    if (channels <= 0 || input.empty() || sampleRate <= 0) return input;
+    ratio = std::max(0.25f, std::min(ratio, 4.0f));
+
+    const int frameLen = std::max(64, (sampleRate * 25) / 1000); // ~25ms analysis window
+    const int synHop    = std::max(1, frameLen / 2);              // 50% overlap on output side
+    const int anaHop    = std::max(1, static_cast<int>(std::round(synHop / ratio)));
+    const int maxShift  = synHop / 2;
+
+    const int64_t inFrames = static_cast<int64_t>(input.size() / channels);
+    if (inFrames <= frameLen) return input; // too short to bother stretching
+
+    const int64_t outFrames = std::max<int64_t>(1, static_cast<int64_t>(std::llround(
+            static_cast<double>(inFrames) * ratio)));
+    std::vector<float> output(static_cast<size_t>(outFrames) * channels, 0.0f);
+    std::vector<float> weight(static_cast<size_t>(outFrames), 0.0f);
+
+    std::vector<float> window(frameLen);
+    for (int i = 0; i < frameLen; i++) {
+        window[i] = 0.5f - 0.5f * cosf(2.0f * static_cast<float>(M_PI) * i / (frameLen - 1));
+    }
+
+    int64_t analysisPos  = 0;
+    int64_t synthesisPos = 0;
+
+    while (synthesisPos < outFrames) {
+        int64_t aPos = std::max<int64_t>(0, std::min(analysisPos, inFrames - frameLen));
+
+        int bestShift = 0;
+        if (synthesisPos > 0 && maxShift > 0) {
+            float bestScore = -1e30f;
+            int overlapLen = static_cast<int>(std::min<int64_t>(
+                    std::min<int64_t>(synHop, outFrames - synthesisPos), frameLen));
+            for (int shift = -maxShift; shift <= maxShift; shift++) {
+                int64_t candidate = aPos + shift;
+                if (candidate < 0 || candidate + frameLen > inFrames) continue;
+                float score = 0.0f;
+                for (int i = 0; i < overlapLen; i++) {
+                    float a = input[static_cast<size_t>((candidate + i) * channels)];
+                    float b = output[static_cast<size_t>((synthesisPos + i) * channels)];
+                    score += a * b;
+                }
+                if (score > bestScore) { bestScore = score; bestShift = shift; }
+            }
+        }
+        int64_t framePos = std::max<int64_t>(0, std::min(aPos + bestShift, inFrames - frameLen));
+
+        for (int i = 0; i < frameLen; i++) {
+            int64_t outIdx = synthesisPos + i;
+            if (outIdx >= outFrames) break;
+            float w = window[i];
+            for (int c = 0; c < channels; c++) {
+                output[static_cast<size_t>(outIdx * channels + c)] +=
+                        input[static_cast<size_t>((framePos + i) * channels + c)] * w;
+            }
+            weight[static_cast<size_t>(outIdx)] += w;
+        }
+
+        analysisPos  += anaHop;
+        synthesisPos += synHop;
+    }
+
+    for (int64_t i = 0; i < outFrames; i++) {
+        float w = weight[static_cast<size_t>(i)];
+        if (w > 1e-6f) {
+            for (int c = 0; c < channels; c++) {
+                output[static_cast<size_t>(i * channels + c)] /= w;
+            }
+        }
+    }
+    return output;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Stream lifecycle
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -48,6 +140,9 @@ bool AudioEngine::start() {
     // (setBufferSizeInFrames adjusts how much of the allocated buffer
     // capacity is actually used; it's safe to call before requestStart.)
     int32_t framesPerBurst = stream_->getFramesPerBurst();
+    framesPerBurst_ = framesPerBurst;
+    currentBufferBursts_ = 1;
+    lastXRunCount_ = 0;
     if (framesPerBurst > 0) {
         stream_->setBufferSizeInFrames(framesPerBurst);
     }
@@ -138,12 +233,49 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
     LOGD("Loaded pad %d: %d frames @ %dHz", padIndex, numFrames, sampleRate);
 }
 
+void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
+    if (padIndex < 0 || padIndex >= kMaxPads) return;
+
+    std::vector<float> srcCopy;
+    int channels = 0, sampleRate = 0;
+    {
+        std::lock_guard<std::mutex> lock(bufferMutex_);
+        if (!buffers_[padIndex].loaded) return;
+        // Close enough to 1.0x that stretching would be inaudible anyway —
+        // drop any cached stretch so playback just uses the raw buffer
+        // (also the path a pad takes when it stops looping at all).
+        if (std::abs(ratio - 1.0f) < 0.01f) {
+            stretchedBuffers_[padIndex].loaded = false;
+            return;
+        }
+        srcCopy    = buffers_[padIndex].samples; // cheap copy; heavy work happens unlocked below
+        channels   = buffers_[padIndex].channels;
+        sampleRate = buffers_[padIndex].sampleRate;
+    }
+
+    // The actual WSOLA pass — frame-by-frame correlation search, genuinely
+    // CPU work — runs OUTSIDE bufferMutex_ so it never blocks the audio
+    // thread's onAudioReady() or a concurrent triggerPad() for a few ms
+    // while this computes.
+    std::vector<float> stretched = wsolaStretch(srcCopy, channels, sampleRate, ratio);
+
+    std::lock_guard<std::mutex> lock(bufferMutex_);
+    // If the pad's sample was reloaded (kit/patch change) while we were
+    // stretching the old one, don't publish a stretch of stale audio.
+    if (!buffers_[padIndex].loaded) return;
+    stretchedBuffers_[padIndex].samples    = std::move(stretched);
+    stretchedBuffers_[padIndex].channels   = channels;
+    stretchedBuffers_[padIndex].sampleRate = sampleRate;
+    stretchedBuffers_[padIndex].loaded     = true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pad playback
 // ─────────────────────────────────────────────────────────────────────────────
 
 void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopExisting,
-                              float lengthFraction, float pan, float gain, float startFraction) {
+                              float lengthFraction, float pan, float gain, float startFraction,
+                              bool useLoopStretch) {
     if (padIndex < 0 || padIndex >= kMaxPads) return;
 
     // A pitch of exactly (or near) 0 makes onAudioReady's playback rate 0,
@@ -254,6 +386,16 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
 
                 Voice &v = *claimed;
                 v.padIndex = padIndex;
+                // Play from the BPM-stretched buffer (see setPadLoopStretch)
+                // only if the caller asked for it AND one is actually cached
+                // and ready — a pad that just started looping (or whose BPM
+                // just changed) may not have a fresh stretch yet, so this
+                // falls back to the raw buffer rather than silently doing
+                // nothing/crashing on an empty one.
+                bool usingStretched = useLoopStretch && stretchedBuffers_[padIndex].loaded
+                        && !stretchedBuffers_[padIndex].samples.empty();
+                v.useStretchedBuffer.store(usingStretched, std::memory_order_relaxed);
+                const PadBuffer &playBuf = usingStretched ? stretchedBuffers_[padIndex] : buffers_[padIndex];
                 // Non-destructive CROP start handle: begin playback
                 // `startFraction` of the way into the sample instead of at
                 // frame 0. Clamped to [0, 0.95] and kept strictly below the
@@ -261,7 +403,7 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
                 float clampedStart = startFraction < 0.0f ? 0.0f : (startFraction > 0.95f ? 0.95f : startFraction);
                 float clampedLen = lengthFraction < 0.05f ? 0.05f : (lengthFraction > 1.0f ? 1.0f : lengthFraction);
                 if (clampedStart >= clampedLen) clampedStart = 0.0f;
-                int64_t totalFrames = static_cast<int64_t>(buffers_[padIndex].samples.size() / 2);
+                int64_t totalFrames = static_cast<int64_t>(playBuf.samples.size() / 2);
                 v.position = static_cast<double>(clampedStart) * static_cast<double>(totalFrames);
                 v.startFraction.store(clampedStart, std::memory_order_relaxed);
                 v.volume.store(volume, std::memory_order_relaxed);
@@ -496,6 +638,29 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     auto *out = static_cast<float*>(audioData);
     std::fill(out, out + numFrames * 2, 0.0f);
 
+    // Adaptive output-buffer sizing ("khich khich" crackle inconsistent
+    // across devices): the stream opens at a single burst for the lowest
+    // possible latency, but some phones' scheduler can't reliably service
+    // the callback at that size and underrun (audible as a click/glitch).
+    // Rather than a single fixed buffer size gambling on every device
+    // coping, grow toward it here — the first time this actual running
+    // stream underruns, bump the buffer by one more burst (capped at 4x,
+    // still low-latency) so it self-tunes per device instead of per code
+    // change. getXRunCount() is a cheap counter read, safe every callback.
+    if (framesPerBurst_ > 0 && currentBufferBursts_ < 4) {
+        auto xRunResult = stream->getXRunCount();
+        if (xRunResult) {
+            int32_t count = xRunResult.value();
+            if (count > lastXRunCount_) {
+                currentBufferBursts_++;
+                stream->setBufferSizeInFrames(framesPerBurst_ * currentBufferBursts_);
+                LOGD("XRun detected (count=%d) -> growing buffer to %d bursts (%d frames)",
+                     count, currentBufferBursts_, framesPerBurst_ * currentBufferBursts_);
+            }
+            lastXRunCount_ = count;
+        }
+    }
+
     // Fire any delay taps that fall in this buffer window.
     //
     // BUG FIX: this used to be gated on delayEnabled_ — but delayEnabled_
@@ -534,7 +699,14 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             // and safely published for this thread to read.
             if (!v.ready.load(std::memory_order_acquire)) continue;
 
-            const PadBuffer &buf = buffers_[v.padIndex];
+            // BPM loop-stretch: mix from the stretched copy only while it's
+            // both requested for this voice AND actually still loaded (a
+            // kit/patch change can drop stretchedBuffers_ out from under a
+            // voice that's still playing, mid-note — fall back to the raw
+            // buffer rather than reading emptied-out memory).
+            bool wantsStretched = v.useStretchedBuffer.load(std::memory_order_relaxed);
+            const PadBuffer &buf = (wantsStretched && stretchedBuffers_[v.padIndex].loaded)
+                    ? stretchedBuffers_[v.padIndex] : buffers_[v.padIndex];
             if (!buf.loaded || buf.samples.empty()) {
                 v.ready.store(false, std::memory_order_release);
                 v.active.store(false, std::memory_order_release);

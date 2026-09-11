@@ -121,9 +121,18 @@ JNIEXPORT void JNICALL
 Java_com_example_myapplication_NativeBridge_triggerPad(
         JNIEnv *env, jobject thiz, jint padIndex, jfloat volume, jfloat pitch,
         jboolean stopExisting, jfloat lengthFraction, jfloat pan, jfloat gain,
-        jfloat startFraction)
+        jfloat startFraction, jboolean useLoopStretch)
 {
-    audioEngine.triggerPad(padIndex, volume, pitch, stopExisting == JNI_TRUE, lengthFraction, pan, gain, startFraction);
+    audioEngine.triggerPad(padIndex, volume, pitch, stopExisting == JNI_TRUE, lengthFraction, pan, gain,
+                            startFraction, useLoopStretch == JNI_TRUE);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_example_myapplication_NativeBridge_setPadLoopStretch(
+        JNIEnv *env, jobject thiz, jint padIndex, jfloat ratio)
+{
+    audioEngine.setPadLoopStretch(padIndex, ratio);
 }
 
 extern "C"

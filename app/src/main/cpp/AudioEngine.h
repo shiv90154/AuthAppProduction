@@ -72,6 +72,13 @@ struct Voice {
     // see AudioEngine::triggerPad(). Not part of the active/ready publish
     // protocol, so relaxed ordering is fine.
     std::atomic<uint64_t> claimSeq{0};
+    // BPM loop-stretch (see AudioEngine::setPadLoopStretch/wsolaStretch):
+    // true = mix this voice from stretchedBuffers_[padIndex] instead of
+    // buffers_[padIndex] — the pitch-preserving time-stretched copy Kotlin
+    // asked for so a looping pad's own duration tracks BPM instead of its
+    // raw recorded length, without changing its pitch. Same write-then-
+    // `ready` discipline as every other Voice field above.
+    std::atomic<bool>  useStretchedBuffer{false};
 };
 
 struct DelayTap {
@@ -93,7 +100,18 @@ public:
 
     void triggerPad(int padIndex, float volume, float pitch, bool stopExisting = true,
                      float lengthFraction = 1.0f, float pan = 0.0f, float gain = 1.0f,
-                     float startFraction = 0.0f);
+                     float startFraction = 0.0f, bool useLoopStretch = false);
+
+    // BPM-driven pitch-preserving time-stretch (WSOLA). `ratio` =
+    // targetDurationMs / originalDurationMs — <1 shortens (speeds up),
+    // >1 lengthens (slows down), pitch/tone stays the same either way,
+    // unlike the PITCH knob's varispeed. Recomputes and caches a stretched
+    // copy of padIndex's CURRENT buffer; a ratio within ~1% of 1.0 just
+    // drops any cached stretch instead (use the raw buffer, no need to
+    // pay the compute for a no-op stretch). Heavy (frame-by-frame
+    // correlation search) — call from Kotlin only when the ratio actually
+    // changes, never on every audio-thread callback.
+    void setPadLoopStretch(int padIndex, float ratio);
     void setPadVolume(int padIndex, float volume);
     void setPadPitch(int padIndex, float pitch);
     void setPadPan(int padIndex, float pan);
@@ -124,9 +142,24 @@ public:
 private:
     std::shared_ptr<oboe::AudioStream> stream_;
     std::array<PadBuffer, kMaxPads>    buffers_;
+    // Pitch-preserving time-stretched copies of buffers_, one slot per pad,
+    // filled on demand by setPadLoopStretch() and read by onAudioReady()
+    // whenever a Voice has useStretchedBuffer set. Guarded by the same
+    // bufferMutex_ as buffers_ itself.
+    std::array<PadBuffer, kMaxPads>    stretchedBuffers_;
     std::array<Voice, kMaxVoices>      voices_;
     std::mutex  bufferMutex_;
     int         outputSampleRate_ = 48000;
+
+    // Adaptive output-buffer sizing — see onAudioReady(). Stream opens at a
+    // single burst (lowest latency) but grows toward 4 bursts the first time
+    // THIS device's stream actually underruns, instead of every phone being
+    // stuck with whichever fixed size happened to be picked — some phones
+    // simply can't sustain 1-burst callback timing and that mismatch is
+    // exactly what produced audible crackle on some devices and not others.
+    int32_t framesPerBurst_       = 0;
+    int32_t currentBufferBursts_  = 1;
+    int32_t lastXRunCount_        = 0;
     // Incremented on every voice claim (fresh or stolen); lets triggerPad
     // find the oldest playing voice to steal when the pool is exhausted.
     std::atomic<uint64_t> voiceClaimCounter_{0};

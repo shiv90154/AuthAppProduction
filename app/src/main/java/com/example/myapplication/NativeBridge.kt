@@ -35,12 +35,24 @@ object NativeBridge {
      * startFraction = 0f..0.95f — how far into the sample playback starts, for
      * the non-destructive per-pad CROP start handle (0f = from the beginning,
      * default). Playback plays the window [startFraction, lengthFraction].
+     * useLoopStretch = true plays from the pitch-preserving BPM time-stretch
+     * cached by setPadLoopStretch() instead of the raw sample, falling back
+     * to the raw sample natively if no stretch is cached yet (false, default,
+     * for every non-looping hit).
      */
     external fun triggerPad(
         padIndex: Int, volume: Float, pitch: Float,
         stopExisting: Boolean = true, lengthFraction: Float = 1f,
-        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f
+        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f,
+        useLoopStretch: Boolean = false
     )
+
+    /** BPM loop-stretch (see triggerPad's useLoopStretch) — pitch-preserving
+     * time-stretch, ratio = targetDurationMs / originalDurationMs. Recomputes
+     * a cached stretched copy of padIndex's current sample; call only when
+     * the ratio actually changes (the WSOLA pass is real per-call CPU work),
+     * never on every frame/tick. */
+    external fun setPadLoopStretch(padIndex: Int, ratio: Float)
 
     external fun setPadVolumeNative(padIndex: Int, volume: Float)
     external fun setPadPitchNative(padIndex: Int, pitch: Float)

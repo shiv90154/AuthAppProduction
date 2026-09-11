@@ -725,6 +725,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
 
 
+    // BPM loop-stretch (client request: BPM should change a looping pad's OWN
+    // duration, pitch-preserving, not just how often it retriggers — see
+    // fire()/wait-loop below). Native's setPadLoopStretch() is real per-call
+    // CPU work (WSOLA), so this caches the last ratio actually pushed per
+    // native slot and skips the call when it hasn't materially changed —
+    // otherwise every single retrigger of an already-stable loop would redo
+    // the stretch for no reason. Plain (non-Compose-state) map: nothing here
+    // needs to trigger recomposition, it's read/written only from fire().
+    val lastLoopStretchRatio = remember { mutableMapOf<Int, Float>() }
+
     /**
      * @param velocityMultiplier  0f..1f — how hard the pad was hit.
      *   1f = full volume (touch-triggered pads always use 1f).
@@ -934,19 +944,37 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             playbackDurationMs = durationToShow
             playbackPositionMs = 0L
 
-            // SPEED (LOOP panel) redesign (client override): SPEED is now
-            // ONLY a loop-rate control — it scales how fast a looping pad
-            // retriggers (see the wait-window math below), and does NOT touch
-            // the sample's pitch anymore. The old varispeed behaviour
-            // ("tone/pitch bhi change ho jata tha") was explicitly asked to be
-            // removed — "sirf tone fast ho, pitch change na ho". BPM was also
-            // dropped from the loop entirely; SPEED is the single loop control.
+            // BPM loop-stretch (client request, 2026-09-11): "BPM me tone ki
+            // speed km/jyada ho, quality same rahe" — BPM should change how
+            // long a looping pad's OWN playback takes, pitch-preserving,
+            // distinct from the PITCH knob's varispeed (which deliberately
+            // changes tone character — "mota patla" — as speed changes).
+            // Computed here (not just in the wait-loop below) because it has
+            // to reach native BEFORE this same fire() call's trigger() below,
+            // same ordering reason syncDelayForHit() runs before trigger.
+            val loopStretchRatio: Float? = if (effectiveLoop()) {
+                val beatIntervalMs =
+                    (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
+                (beatIntervalMs.toFloat() / durationToShow.toFloat()).coerceIn(0.25f, 4.0f)
+            } else null
+
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
                     slot >= 8  -> currentKitB
                     else       -> currentKit
                 }
                 if (kitForSlot in kits.indices) {
+                    // Only push a fresh WSOLA stretch to native when the
+                    // ratio actually changed for this slot — recomputing it
+                    // on every single retrigger of an already-stable loop
+                    // would redo real CPU work (frame correlation search)
+                    // for an identical result every beat.
+                    if (loopStretchRatio != null &&
+                        kotlin.math.abs((lastLoopStretchRatio[slot] ?: Float.NaN) - loopStretchRatio) > 0.01f
+                    ) {
+                        DrumEngine.setLoopStretch(slot, loopStretchRatio)
+                        lastLoopStretchRatio[slot] = loopStretchRatio
+                    }
                     DrumEngine.trigger(
                         slot,
                         kits[kitForSlot].volumes[index] * effectiveVelocity,
@@ -955,7 +983,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         lengthFraction = kits[kitForSlot].padLengthPct.getOrElse(index) { 1f },
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
                         gain = kits[kitForSlot].padGain.getOrElse(index) { 1f },
-                        startFraction = kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f }
+                        startFraction = kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f },
+                        useLoopStretch = loopStretchRatio != null
                     )
                 }
             }
@@ -976,24 +1005,34 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 var keepGoing = true
 
                 while (keepGoing) {
-                    // Loop tempo (client override, 2026-09-08): BPM is back as
-                    // the base beat rate; SPEED is a fine-tune multiplier
-                    // around it (0.9x–1.1x, clamped here too). SPEED does NOT
-                    // touch pitch — that's the PITCH knob's job now (varispeed
-                    // stays removed, see fire()).
+                    // Loop tempo (client override, 2026-09-08, revised
+                    // 2026-09-11): BPM is the base beat rate; SPEED is a
+                    // fine-tune multiplier around it (0.9x-1.1x, clamped here
+                    // too). SPEED does NOT touch pitch — that's the PITCH
+                    // knob's job (varispeed stays removed, see fire()).
                     //
-                    // beatIntervalMs = 60000 / BPM / SPEED. The
-                    // maxOf(beatIntervalMs, durationToShow) floor guarantees a
-                    // sample longer than one beat is never cut mid-playback —
-                    // the loop just repeats at the sample's own length. A short
-                    // sample at a slow BPM leaves a rhythmic gap between
-                    // repeats; that is what BPM-synced looping is, and what the
-                    // client asked to keep ("BPM remove nahi karna tha").
+                    // beatIntervalMs = 60000 / BPM / SPEED.
+                    //
+                    // BUG FIX / feature change (client, 2026-09-11): "BPM me
+                    // tone ki quality same rahe, sirf speed/duration badle" —
+                    // the old `maxOf(beatIntervalMs, durationToShow)` floor
+                    // existed only because a sample longer than one beat used
+                    // to have nowhere to go but get cut off mid-playback.
+                    // fire() now pushes a pitch-preserving WSOLA stretch to
+                    // native (see setPadLoopStretch) that resizes the sample
+                    // itself to fit the beat — so the floor is gone, and the
+                    // wait window matches exactly what native was told to
+                    // stretch to (same 0.25x-4x clamp fire() uses), keeping
+                    // this coroutine's retrigger timing in lockstep with the
+                    // actually-playing (possibly stretched) audio instead of
+                    // drifting from it.
                     val beatIntervalMs =
                         (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f))
                             .toLong().coerceAtLeast(50L)
-                    val waitWindowMs =
-                        if (effectiveLoop()) maxOf(beatIntervalMs, durationToShow) else durationToShow
+                    val waitWindowMs = if (effectiveLoop()) {
+                        val ratio = (beatIntervalMs.toFloat() / durationToShow.toFloat()).coerceIn(0.25f, 4.0f)
+                        (durationToShow * ratio).toLong().coerceAtLeast(50L)
+                    } else durationToShow
 
                     val startTime = System.currentTimeMillis()
                     var elapsed = 0L
@@ -1564,13 +1603,42 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // rahe"). So: use `currentKit` when it's a *still-blank* Bank A slot;
     // otherwise fall back to the first blank so a load never silently
     // overwrites a factory kit OR a kit the user has already built.
+    //
+    // BUG FIX (client: "ABANK me jaise patch direct load ho jaata hai, waise
+    // hi BBANK me bhi load dabane se koi bhi tone direct BBANK me load ho
+    // jaaye"): this used to be hardcoded to Bank A's pool no matter which
+    // bank was actually selected, so Load Kit / Import Patch while Bank B was
+    // active silently landed the new kit in Bank A instead. Now bank-aware:
+    // Bank B only (not A+B, which stays Bank A like every other bank-aware
+    // "current" read in this file defaulting to A) targets Bank B's paired
+    // pool instead.
     fun targetSlotForLoad(): Int? {
+        if (bankMode == "B") {
+            val curB = currentKitB
+            if (curB in BANK_B_KIT_START..BANK_B_KIT_END &&
+                kits[curB].factoryKitNumber == -1 &&
+                kits[curB].name.startsWith("EMPTY B ")
+            ) return curB
+            return firstFreeBankBSlot()
+        }
         val cur = currentKit
         if (cur in 0 until BANK_A_KIT_CAPACITY &&
             kits[cur].factoryKitNumber == -1 &&
             kits[cur].name.startsWith("EMPTY ")
         ) return cur
         return firstFreeBankASlot()
+    }
+
+    // targetSlotForLoad() can now return a Bank B index — this commits the
+    // load result to whichever bank var actually owns that slot, instead of
+    // always stomping `currentKit` (which would silently re-point Bank A at
+    // a Bank B index via the pairing effect above, corrupting both banks).
+    fun commitLoadedKitIndex(newKitIndex: Int) {
+        if (newKitIndex in BANK_B_KIT_START..BANK_B_KIT_END) {
+            currentKitB = newKitIndex
+        } else {
+            currentKit = newKitIndex
+        }
     }
 
     // NEW: duplicates kits[index] (all volumes/pitches/EQ/choke groups/custom
@@ -2731,7 +2799,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             ).show()
                         } else {
                             kits[newKitIndex] = newKit
-                            currentKit = newKitIndex
+                            commitLoadedKitIndex(newKitIndex)
 
                             importedAudios.forEach { ia ->
                                 AudioRepository.add(
@@ -2745,7 +2813,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                         it.assignedKit = newKitIndex
                                     }
                                 )
-                                DrumEngine.invalidatePad(ia.padIndex)
+                                // BUG FIX: was a bare DrumEngine.invalidatePad(ia.padIndex)
+                                // — correct only while Bank A is active. Now that
+                                // targetSlotForLoad() can land this kit in Bank B's
+                                // pool, invalidate through nativeSlotsFor() so a
+                                // Bank-B-targeted load actually flags Bank B's
+                                // native slot (padIndex + 8), not Bank A's.
+                                nativeSlotsFor(ia.padIndex).forEach { DrumEngine.invalidatePad(it) }
                             }
 
                             persistKits()
@@ -2772,7 +2846,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             sounds = mutableStateListOf(-1,-1,-1,-1,-1,-1,-1,-1),
                             factoryKitNumber = -1
                         )
-                        currentKit = newKitIndex
+                        commitLoadedKitIndex(newKitIndex)
 
                         // Assign each file to its pad slot
                         files.forEachIndexed { padIndex, (uri, displayName) ->
@@ -2796,7 +2870,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                                     item.assignedKit = newKitIndex
                                 }
                             )
-                            DrumEngine.invalidatePad(padIndex)
+                            // Same nativeSlotsFor() fix as ImportPatchScreen above.
+                            nativeSlotsFor(padIndex).forEach { DrumEngine.invalidatePad(it) }
                         }
 
                         persistKits()

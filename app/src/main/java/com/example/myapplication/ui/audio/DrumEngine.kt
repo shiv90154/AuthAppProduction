@@ -139,10 +139,14 @@ object DrumEngine {
     fun trigger(
         padIndex: Int, volume: Float, pitch: Float,
         stopExisting: Boolean = true, lengthFraction: Float = 1f,
-        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f
+        pan: Float = 0f, gain: Float = 1f, startFraction: Float = 0f,
+        useLoopStretch: Boolean = false
     ) {
-        NativeBridge.triggerPad(padIndex, volume, pitch, stopExisting, lengthFraction, pan, gain, startFraction)
+        NativeBridge.triggerPad(padIndex, volume, pitch, stopExisting, lengthFraction, pan, gain, startFraction, useLoopStretch)
     }
+
+    /** BPM loop-stretch — see NativeBridge.setPadLoopStretch. */
+    fun setLoopStretch(padIndex: Int, ratio: Float) = NativeBridge.setPadLoopStretch(padIndex, ratio)
 
     fun invalidatePad(padIndex: Int) {
         loadedKey[padIndex] = null

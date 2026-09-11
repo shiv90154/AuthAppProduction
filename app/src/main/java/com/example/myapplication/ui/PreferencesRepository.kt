@@ -122,17 +122,17 @@ object PreferencesRepository {
         prefs()?.edit()?.putInt(KEY_KIT_B, index)?.apply()
     }
 
-    // BUG FIX (B bank kit isolation): used to default to index 25 ("EMPTY
-    // 026"), which is still inside Bank A's own 0..199 kit pool — Bank A
-    // and Bank B indexed into the very same shared `kits` list back then,
-    // so this was never actually isolated from Bank A, just started on a
-    // kit that happened to look blank. `kits` now has a dedicated,
-    // permanently-blank 200-slot pool reserved for Bank B at indices
-    // 200..399 (see OctapadScreen.kt's BANK_B_KIT_START) — default there
-    // instead, and OctapadScreen.kt migrates any pre-existing saved value
-    // (including this old default of 25) that still points into Bank A's
-    // range back onto Bank B's own pool.
-    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 200) ?: 200
+    // Bank A and Bank B share ONE 0..199 kit pool again (client override,
+    // 2026-09-11 — see OctapadScreen.kt's BANK_A_KIT_CAPACITY comment; this
+    // reverses an earlier "B bank kit isolation" fix that gave Bank B its
+    // own separate 200..399 pool). Defaults to index 25 ("EMPTY 026") — a
+    // blank slot distinct from index 0, so a fresh install doesn't have A
+    // and B defaulting to literally the same kit and looking "linked" by
+    // accident. A saved value from the old separate-pool era (200..399) gets
+    // coerced into range by OctapadScreen.kt's `.coerceIn(0, BANK_A_KIT_
+    // CAPACITY - 1)` on load — lands on 199, not ideal but harmless, the
+    // user just re-picks Bank B's kit once after upgrading.
+    fun loadKitB(): Int = prefs()?.getInt(KEY_KIT_B, 25) ?: 25
 
     fun saveKitC(index: Int) {
         prefs()?.edit()?.putInt(KEY_KIT_C, index)?.apply()

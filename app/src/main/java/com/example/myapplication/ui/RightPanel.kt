@@ -79,6 +79,14 @@ fun RightPanel(
     onKitPrev: () -> Unit,
     onKitNext: () -> Unit,
     onOpenKitList: () -> Unit,
+    // Bank B's own independent kit navigation (client override, 2026-09-11:
+    // Bank A and Bank B share one kit pool but each picks its own index into
+    // it — no more auto-pairing). Only rendered while Bank B is part of the
+    // active selection (bankMode contains 'B').
+    kitBName: String = "",
+    onKitBPrev: () -> Unit = {},
+    onKitBNext: () -> Unit = {},
+    onOpenKitListB: () -> Unit = {},
     // NEW: MIDI-note "FX" / "MASTER_DELAY" targets — OctapadScreen increments
     // these counters; each change toggles the matching side panel here.
     openFxPanelRequest: Int = 0,
@@ -379,12 +387,12 @@ fun RightPanel(
         // instead, so the trim now adapts per-device rather than only being
         // correct for whatever device it was last tuned against.
         BoxWithConstraints(modifier = Modifier.fillMaxHeight()) {
-        // The Bank B kit-selector row ("< B: kitname >") was removed — Bank B
-        // is now paired to Bank A's kit number and has no manual selector — so
-        // there is no longer an extra ~40dp row to budget for when Bank B is
-        // active. Kept as a named 0.dp so the heightScale expression below
-        // reads the same as before.
-        val bankBExtra = 0.dp
+        // The Bank B kit-selector row ("< B: kitname >") is back (client
+        // override, 2026-09-11 — see the `'B' in bankMode` block above) —
+        // budget its ~26dp (row + spacer) into the height-scale calculation
+        // below whenever Bank B is part of the active selection, same as the
+        // MASTER DELAY bar's own budget further down.
+        val bankBExtra = if ('B' in bankMode) 26.dp else 0.dp
         // 406dp (was 380) — bumped when the MASTER DELAY bar + its spacer
         // (~26dp) were added to the strip; folding that into the reference
         // budget keeps heightScale shrinking enough that the bottom PATCH
@@ -817,13 +825,66 @@ fun RightPanel(
                 }
             }
 
-            // The manual "< B: kitname >" Bank B kit selector that used to
-            // render here (while Bank B was audible) was removed per client
-            // request: Bank B is now permanently paired to Bank A's kit
-            // number, so pressing PATCH/PATCH LIST/< > for Bank A moves Bank B
-            // in lock-step. The LCD name label above already shows the active
-            // bank's kit via bankKitIdx, and OctapadScreen drives currentKitB
-            // from currentKit — nothing to select here anymore.
+            // Bank B's own "< B: kitname >" kit selector — restored (client
+            // override, 2026-09-11): Bank A and Bank B now share one kit pool
+            // but pick their kit number independently again (Bank B is no
+            // longer auto-paired to Bank A's number). Only shown while Bank B
+            // is actually part of the active selection, mirroring the old
+            // `bankBExtra` height-budget gate this row used before removal.
+            if ('B' in bankMode) {
+                Spacer(modifier = Modifier.height(vSpace(4.dp)))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment     = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(NavRed)
+                            .pointerInput(Unit) { detectTapGestures { onKitBPrev() } },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("<", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 6.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(BtnBg)
+                            .pointerInput(Unit) {
+                                detectTapGestures {
+                                    activeBtn = ""
+                                    closeAllPanels()
+                                    onOpenKitListB()
+                                }
+                            }
+                            .padding(horizontal = 6.dp, vertical = 5.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            "B: $kitBName",
+                            color = Color(0xFFCCCCCC),
+                            fontSize = 8.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(NavRed)
+                            .pointerInput(Unit) { detectTapGestures { onKitBNext() } },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(">", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.ExtraBold)
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(vSpace(6.dp)))
 

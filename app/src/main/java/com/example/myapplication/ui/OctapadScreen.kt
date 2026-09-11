@@ -116,20 +116,18 @@ data class Kit(
 // timing logic keeps working exactly as before for pads with no custom audio.
 const val DEFAULT_PAD_DURATION_MS = 500L
 
-// BUG FIX (B bank kit isolation): Bank A and Bank B used to index into the
-// SAME shared `kits` list (one 200-slot pool) — landing on the same kit
-// number on both banks meant literally the same Kit object (same
-// volumes/pitches/chokeGroups/sounds SnapshotStateLists), so
-// editing/importing/cropping a pad from Bank B silently mutated Bank A's
-// pre-built kit too ("B bank use karne par A bank bigad jata hai"). `kits`
-// is now always kept at a minimum of BANK_A_KIT_CAPACITY + BANK_B_KIT_CAPACITY
-// (400) slots: 0..(BANK_A_KIT_CAPACITY-1) stays Bank A's pool exactly as
-// before (25 factory kits + blanks), BANK_B_KIT_START..BANK_B_KIT_END is a
-// second, always-blank pool reserved exclusively for Bank B. The two ranges
-// never overlap, so the two banks can never land on the same Kit object.
+// Bank A and Bank B share ONE 200-slot kit pool (client override,
+// 2026-09-11: "mujhe ek hi list chahiye A and B, 0-199 ke beech dono ek hi
+// mein" — explicitly reverses the "B bank kit isolation" fix that used to
+// live here, a separate 200-slot pool per bank at BANK_B_KIT_START..
+// BANK_B_KIT_END). Bank A and Bank B each hold their OWN independent
+// current-kit index (currentKit / currentKitB below, no more auto-pairing),
+// but both index into this same 0..(BANK_A_KIT_CAPACITY-1) list — pick kit 2
+// on A and kit 3 on B and A+B plays kit 2 + kit 3 together; pick the same
+// number on both and they're deliberately the literal same Kit object (same
+// sound on both banks), which is the point this time, not the bug the old
+// isolation fix was guarding against.
 const val BANK_A_KIT_CAPACITY = 200
-const val BANK_B_KIT_START = BANK_A_KIT_CAPACITY
-const val BANK_B_KIT_END = BANK_A_KIT_CAPACITY * 2 - 1
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 @Composable
@@ -403,26 +401,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             }
         }
 
-        // BUG FIX (B bank kit isolation): guarantee a dedicated, always-blank
-        // 200-slot pool for Bank B at indices BANK_B_KIT_START..BANK_B_KIT_END,
-        // separate from Bank A's 0..(BANK_A_KIT_CAPACITY-1) pool above — this
-        // runs both on first launch (kitList already has exactly 200 A-bank
-        // entries from the branches above) and as a one-time migration for
-        // installs saved before this fix (which also only ever had 200
-        // entries, since the old "New Kit"/copy 200-cap made growing past 200
-        // via those paths impossible — only ImportPatchScreen/LoadKitScreen
-        // could organically grow past 200, so padding up to at least 400 here
-        // is always safe and never drops any existing kit).
-        while (kitList.size < BANK_B_KIT_END + 1) {
-            val slot = kitList.size - BANK_B_KIT_START + 1
-            kitList.add(
-                Kit(
-                    "EMPTY B %03d".format(slot),
-                    sounds = mutableStateListOf(-1, -1, -1, -1, -1, -1, -1, -1),
-                    factoryKitNumber = -1
-                )
-            )
-        }
+        // NOTE: no more Bank-B-specific padding loop here — Bank A and Bank B
+        // now share this same list (see the BANK_A_KIT_CAPACITY comment
+        // above). An install saved from before this change may still have up
+        // to 400 entries on disk (the old separate Bank B pool at indices
+        // 200..399) — those are simply never read/written anymore (neither
+        // bank's index ever points past BANK_A_KIT_CAPACITY-1 going forward),
+        // left in place harmlessly rather than actively deleted.
 
         kitList
     }
@@ -437,30 +422,25 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // non-scrolling panel whenever it was active) — strip any leftover 'C'
     // from a value persisted before the removal so an old install doesn't
     // come back up in a now-nonexistent bank mode.
+    // Bank B is independently navigable again (client override, 2026-09-11 —
+    // reverses the 2026-09-07 auto-pairing below). currentKitB is its own
+    // index into the SAME shared kits[] pool Bank A uses (see the
+    // BANK_A_KIT_CAPACITY comment near the top) — restored from its own
+    // persisted last-selected value, independent of Bank A's.
     var currentKitB by remember {
-        mutableStateOf(BANK_B_KIT_START + KitRepository.loadLastSelectedKit().coerceIn(0, BANK_A_KIT_CAPACITY - 1))
+        mutableStateOf(PreferencesRepository.loadKitB().coerceIn(0, BANK_A_KIT_CAPACITY - 1))
     }
     var bankMode by remember { mutableStateOf(PreferencesRepository.loadBankMode().replace("C", "").ifEmpty { "A" }) }
 
     LaunchedEffect(currentKitB) { PreferencesRepository.saveKitB(currentKitB) }
     LaunchedEffect(bankMode)    { PreferencesRepository.saveBankMode(bankMode) }
 
-    // Bank B is permanently PAIRED to Bank A's kit number (client request,
-    // 2026-09-07: "A bank ka 10 number kit dabau to B bank me bhi automatic
-    // 10 number kit aaye" — and "baar baar set karna padta hai" for the old
-    // manual selector). Selecting Bank A kit N always points Bank B at its
-    // own pool slot N (BANK_B_KIT_START + N). There is no independent Bank B
-    // kit selector anymore — the old "< B: name >" step buttons and the
-    // Bank-B patch-list entry point were removed from RightPanel. Editing
-    // pads while Bank B (or A+B) is active still writes into — and persists —
-    // this paired B-pool slot via bankKitIdx(), so every Bank A patch keeps
-    // its own dedicated Bank B layer that comes back automatically with it.
-    // currentKitB stays a real state var (not derivedStateOf) so the now-dead
-    // `kitListTargetsBankB` branches still compile; it's just never written
-    // anywhere except here now.
-    LaunchedEffect(currentKit) {
-        currentKitB = BANK_B_KIT_START + currentKit.coerceIn(0, BANK_A_KIT_CAPACITY - 1)
-    }
+    // Bank B step/PATCH-LIST navigation, independent of Bank A's (see above).
+    // Mirrors Bank A's onKitPrev/onKitNext/PATCH LIST wiring further down but
+    // targets currentKitB and stays inside the same 0..(BANK_A_KIT_CAPACITY-1)
+    // shared range.
+    fun onKitBPrev() { if (currentKitB > 0) currentKitB-- }
+    fun onKitBNext() { if (currentKitB < BANK_A_KIT_CAPACITY - 1) currentKitB++ }
 
     // BUG FIX: the pad VOL/PITCH controls (and the matching MIDI CC handlers)
     // used to always read/write kits[currentKit] — Bank A's kit — no matter
@@ -1526,30 +1506,26 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         return "KIT %03d".format(nextNumber)
     }
 
-    // BUG FIX (B bank kit isolation): a plain `kits.removeAt(index)` shifts
-    // every kit after `index` down by one slot — for an index inside either
-    // bank's fixed BANK_A/BANK_B reserved range, that would silently move
-    // every other reserved-range kit (including all of the OTHER bank's
-    // kits) into a different absolute index, eventually letting the two
-    // banks' ranges drift into each other again. Deleting a kit inside
-    // either reserved range (0..BANK_B_KIT_END) now resets that slot back
-    // to a blank placeholder IN PLACE instead of removing it, so every
-    // other kit — in both banks — keeps its absolute index. Only kits
-    // beyond BANK_B_KIT_END (organic overflow from Import Patch/Load Kit,
-    // which have never had a slot cap) are still physically removed, since
-    // nothing else depends on their exact position.
+    // BUG FIX: a plain `kits.removeAt(index)` shifts every kit after `index`
+    // down by one slot — for an index inside the shared 0..(BANK_A_KIT_
+    // CAPACITY-1) pool both banks index into, that would silently move every
+    // other kit in that range to a different absolute index, breaking
+    // whichever bank (A or B) wasn't looking at `index` at the time. Deleting
+    // a kit inside that shared range resets the slot back to a blank
+    // placeholder IN PLACE instead of removing it, so every other kit keeps
+    // its absolute index. Only kits beyond that range (organic overflow from
+    // Import Patch/Load Kit, which have never had a slot cap, or a pre-
+    // 2026-09-11 install's now-unused separate Bank B pool at 200..399 — see
+    // the BANK_A_KIT_CAPACITY comment near the top) are still physically
+    // removed, since nothing reads their exact position anymore.
     fun deleteKit(index: Int) {
 
         if (kits.size <= 1) return
         if (index !in kits.indices) return
 
-        if (index <= BANK_B_KIT_END) {
-            val blankName = if (index < BANK_A_KIT_CAPACITY)
-                "EMPTY %03d".format(index + 1)
-            else
-                "EMPTY B %03d".format(index - BANK_B_KIT_START + 1)
+        if (index < BANK_A_KIT_CAPACITY) {
             kits[index] = Kit(
-                blankName,
+                "EMPTY %03d".format(index + 1),
                 sounds = mutableStateListOf(-1, -1, -1, -1, -1, -1, -1, -1),
                 factoryKitNumber = -1
             )
@@ -1565,31 +1541,21 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             currentKit = 0
         }
 
-        if (currentKitB !in BANK_B_KIT_START..BANK_B_KIT_END) {
-            currentKitB = BANK_B_KIT_START
+        if (currentKitB !in 0 until BANK_A_KIT_CAPACITY) {
+            currentKitB = 0
         }
 
         persistKits()   // NEW
     }
 
-    // Bank B's pool is a fixed 200 slots (BANK_B_KIT_START..BANK_B_KIT_END)
-    // that never grows — "free" means still an untouched blank placeholder
-    // (factoryKitNumber == -1 and never renamed off its auto-generated
-    // "EMPTY B ###" name).
-    fun firstFreeBankBSlot(): Int? =
-        (BANK_B_KIT_START..BANK_B_KIT_END).firstOrNull {
-            kits[it].factoryKitNumber == -1 && kits[it].name.startsWith("EMPTY B ")
-        }
-
-    // BUG FIX: `kits` is permanently padded to >= 400 entries (Bank A pool
-    // 0..199, Bank B pool 200..399), so every `kits.add(...)` for a new
-    // Bank A kit landed at index 400+ — outside Bank A's Patch List range
-    // (0..199) and outside the `onKitNext` cap (BANK_A_KIT_CAPACITY-1), so
-    // the new/loaded kit was invisible in the list and `>` (next patch)
-    // stopped working (only `<` did, walking back into Bank B's pool). Every
-    // Bank A "create kit" path (NEW KIT button, Patch List + NEW KIT, Load
-    // Kit From Folder, Import Patch) now writes into the first still-blank
-    // slot inside Bank A's own 0..199 pool instead of appending past it.
+    // BUG FIX: `kits` used to be permanently padded to >= 400 entries (Bank A
+    // pool 0..199, Bank B pool 200..399), so `kits.add(...)` for a new kit
+    // landed at index 400+ — outside the Patch List range and the
+    // `onKitNext` cap, invisible in the list. Now Bank A and Bank B share one
+    // 0..(BANK_A_KIT_CAPACITY-1) pool (see the BANK_A_KIT_CAPACITY comment
+    // near the top), and every "create kit" path (NEW KIT, Load Kit From
+    // Folder, Import Patch, Copy) writes into the first still-blank slot in
+    // that shared pool instead of appending past it.
     fun firstFreeBankASlot(): Int? =
         (0 until BANK_A_KIT_CAPACITY).firstOrNull {
             kits[it].factoryKitNumber == -1 && kits[it].name.startsWith("EMPTY ")
@@ -1600,28 +1566,17 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // firstFreeBankASlot() picks the lowest still-blank slot, which jumps
     // around as slots fill/empty. The client expects the load to go into the
     // patch they're currently looking at ("jis kit me load kare wahi set
-    // rahe"). So: use `currentKit` when it's a *still-blank* Bank A slot;
-    // otherwise fall back to the first blank so a load never silently
+    // rahe"). So: use whichever bank's *current* index is a still-blank
+    // slot; otherwise fall back to the first blank so a load never silently
     // overwrites a factory kit OR a kit the user has already built.
     //
-    // BUG FIX (client: "ABANK me jaise patch direct load ho jaata hai, waise
-    // hi BBANK me bhi load dabane se koi bhi tone direct BBANK me load ho
-    // jaaye"): this used to be hardcoded to Bank A's pool no matter which
-    // bank was actually selected, so Load Kit / Import Patch while Bank B was
-    // active silently landed the new kit in Bank A instead. Now bank-aware:
-    // Bank B only (not A+B, which stays Bank A like every other bank-aware
-    // "current" read in this file defaulting to A) targets Bank B's paired
-    // pool instead.
+    // Bank-aware (client: "ABANK me jaise patch direct load ho jaata hai,
+    // waise hi BBANK me bhi"): Bank B only (not A+B, which stays Bank A like
+    // every other bank-aware "current" read in this file defaulting to A)
+    // checks currentKitB instead of currentKit — both against the SAME
+    // shared pool now, since Bank A and Bank B no longer have separate pools.
     fun targetSlotForLoad(): Int? {
-        if (bankMode == "B") {
-            val curB = currentKitB
-            if (curB in BANK_B_KIT_START..BANK_B_KIT_END &&
-                kits[curB].factoryKitNumber == -1 &&
-                kits[curB].name.startsWith("EMPTY B ")
-            ) return curB
-            return firstFreeBankBSlot()
-        }
-        val cur = currentKit
+        val cur = if (bankMode == "B") currentKitB else currentKit
         if (cur in 0 until BANK_A_KIT_CAPACITY &&
             kits[cur].factoryKitNumber == -1 &&
             kits[cur].name.startsWith("EMPTY ")
@@ -1629,23 +1584,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         return firstFreeBankASlot()
     }
 
-    // targetSlotForLoad() can now return a Bank B index — this commits the
-    // load result to whichever bank var actually owns that slot, instead of
-    // always stomping `currentKit` (which would silently re-point Bank A at
-    // a Bank B index via the pairing effect above, corrupting both banks).
+    // Commits a targetSlotForLoad() result to whichever bank is actually
+    // active — can't be inferred from the index anymore now that Bank A and
+    // Bank B share one pool (any index could belong to either bank).
     fun commitLoadedKitIndex(newKitIndex: Int) {
-        if (newKitIndex in BANK_B_KIT_START..BANK_B_KIT_END) {
-            currentKitB = newKitIndex
-        } else {
-            currentKit = newKitIndex
-        }
+        if (bankMode == "B") currentKitB = newKitIndex else currentKit = newKitIndex
     }
 
     // NEW: duplicates kits[index] (all volumes/pitches/EQ/choke groups/custom
-    // audio). `intoBankB` = true writes the copy into a free slot inside
-    // Bank B's own reserved pool (never appended past it — appending would
-    // land outside the range currentKitB is confined to); false (Bank A)
-    // keeps the original behavior of appending a new kit at the end.
+    // audio) into the first free slot of the shared pool. `intoBankB` picks
+    // which bank's current-kit pointer (currentKitB vs currentKit) ends up
+    // pointing at the copy — both banks draw from the same pool now (see the
+    // BANK_A_KIT_CAPACITY comment near the top), so there's no separate
+    // "Bank B's own reserved pool" to write into anymore.
     fun copyKit(index: Int, intoBankB: Boolean = false) {
         if (index !in kits.indices) return
 
@@ -1673,7 +1624,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         )
 
         if (intoBankB) {
-            val freeSlot = firstFreeBankBSlot() ?: return
+            val freeSlot = firstFreeBankASlot()
+            if (freeSlot == null) {
+                android.widget.Toast.makeText(
+                    context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                ).show()
+                return
+            }
             kits[freeSlot] = newKit
             AudioRepository.copyForKit(index, freeSlot)
             currentKitB = freeSlot
@@ -2407,6 +2364,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 // through the Patch List's search, just not via +/- stepping.
                 onKitNext     = { if (currentKit < BANK_A_KIT_CAPACITY - 1) currentKit++ },
                 onOpenKitList = { kitListTargetsBankB = false; showKitList = true },
+                // Bank B's own independent navigation (client override,
+                // 2026-09-11 — see the BANK_A_KIT_CAPACITY comment near the
+                // top). Same shared pool as Bank A, own current-kit pointer.
+                kitBName = kits.getOrNull(currentKitB)?.name ?: "",
+                onKitBPrev = { onKitBPrev() },
+                onKitBNext = { onKitBNext() },
+                onOpenKitListB = { kitListTargetsBankB = true; showKitList = true },
                 openFxPanelRequest = openFxPanelRequest,
                 openDelayPanelRequest = openDelayPanelRequest,
                 // ── NEW callbacks ──────────────────────────────────────────────
@@ -2496,10 +2460,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             KitListScreen(
                 kits       = kits,
                 currentKit = if (kitListTargetsBankB) currentKitB else currentKit,
-                // BUG FIX (B bank kit isolation): Bank B's list must only
-                // show/act on its own reserved pool, never Bank A's — see
-                // BANK_B_KIT_START/BANK_B_KIT_END near the top of this file.
-                visibleRange = if (kitListTargetsBankB) BANK_B_KIT_START..BANK_B_KIT_END else 0 until BANK_A_KIT_CAPACITY,
+                // Bank A and Bank B now share the same 0..(BANK_A_KIT_
+                // CAPACITY-1) pool (see the BANK_A_KIT_CAPACITY comment near
+                // the top) — same visibleRange either way, just a different
+                // highlighted/written index (currentKit vs currentKitB).
+                visibleRange = 0 until BANK_A_KIT_CAPACITY,
                 onSelect   = { index ->
                     if (kitListTargetsBankB) currentKitB = index else currentKit = index
                     showKitList = false
@@ -2507,11 +2472,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 onAdd = {
                     if (kitListTargetsBankB) {
-                        // Bank B's pool is fixed-size — "add" jumps to the
-                        // next still-blank slot inside it instead of
-                        // growing the array (which would land outside the
-                        // range currentKitB is confined to).
-                        val freeSlot = firstFreeBankBSlot()
+                        // Same shared pool as Bank A now (see the
+                        // BANK_A_KIT_CAPACITY comment near the top) — "add"
+                        // jumps to the next still-blank slot in it, just
+                        // pointed at by currentKitB instead of currentKit.
+                        val freeSlot = firstFreeBankASlot()
                         if (freeSlot != null) {
                             kits[freeSlot] = kits[freeSlot].copy(name = generateNextKitName())
                             currentKitB = freeSlot
@@ -2521,7 +2486,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             showKitList = false
                         } else {
                             android.widget.Toast.makeText(
-                                context, "All 200 Bank B kit slots are in use", android.widget.Toast.LENGTH_SHORT
+                                context, "All 200 kit slots are in use", android.widget.Toast.LENGTH_SHORT
                             ).show()
                         }
                     } else {

@@ -37,7 +37,16 @@ import com.example.myapplication.ui.audio.DrumEngine
 fun AudioListScreen(
     currentKit: Int,
     factoryResIds: List<Int>,
-    onClose: () -> Unit
+    onClose: () -> Unit,
+    // BUG FIX (code review, 2026-09-11): reassigning a pad's audio here used
+    // to reload the native pad via bare DrumEngine.invalidatePad(pad)/
+    // loadPad(..., pad) — correct only while Bank A is active, since those
+    // default to native slot == padIndex. `currentKit` is already
+    // bankKitIdx()-aware, but this screen has no access to bankMode/
+    // nativeSlotsFor() itself. Defaults to the old raw-padIndex behavior so
+    // any other caller not yet passing this still compiles and behaves the
+    // same as before.
+    invalidateNativePads: (padIndex: Int) -> List<Int> = { listOf(it) }
 ) {
     val context = LocalContext.current
 
@@ -217,24 +226,16 @@ fun AudioListScreen(
 
                         val oldDefaultResId = defaultResIdFor(oldPad)
 
-
-                        DrumEngine.invalidatePad(oldPad)
-                        DrumEngine.invalidatePad(padIndex)
-                        DrumEngine.loadPad(
-                            context,
-                            currentKit,
-                            oldPad,
-                            oldDefaultResId
-                        )
+                        invalidateNativePads(oldPad).forEach { slot ->
+                            DrumEngine.invalidatePad(slot)
+                            DrumEngine.loadPad(context, currentKit, oldPad, oldDefaultResId, nativeSlot = slot)
+                        }
                     }
                     val defaultResId = defaultResIdFor(padIndex)
-                    DrumEngine.invalidatePad(padIndex)
-                    DrumEngine.loadPad(
-                        context,
-                        currentKit,
-                        padIndex,
-                        defaultResId
-                    )
+                    invalidateNativePads(padIndex).forEach { slot ->
+                        DrumEngine.invalidatePad(slot)
+                        DrumEngine.loadPad(context, currentKit, padIndex, defaultResId, nativeSlot = slot)
+                    }
                     assignTarget = null
                     refresh()
                 },
@@ -248,13 +249,10 @@ fun AudioListScreen(
                     if (oldPad >= 0) {
 
                         val defaultResId = defaultResIdFor(oldPad)
-                        DrumEngine.invalidatePad(oldPad)
-                        DrumEngine.loadPad(
-                            context,
-                            currentKit,
-                            oldPad,
-                            defaultResId
-                        )
+                        invalidateNativePads(oldPad).forEach { slot ->
+                            DrumEngine.invalidatePad(slot)
+                            DrumEngine.loadPad(context, currentKit, oldPad, defaultResId, nativeSlot = slot)
+                        }
                     }
 
                     assignTarget = null

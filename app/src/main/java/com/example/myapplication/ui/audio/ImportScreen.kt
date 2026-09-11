@@ -44,7 +44,16 @@ fun ImportScreen(
     onClose: () -> Unit,
     currentKit: Int = 0,
     targetPad: Int? = null,
-    targetPadDefaultResId: Int = -1
+    targetPadDefaultResId: Int = -1,
+    // BUG FIX (code review, 2026-09-11): this used to reload the native pad
+    // via bare DrumEngine.invalidatePad(pad)/loadPad(..., pad) — correct
+    // only while Bank A is active, since those default to native slot ==
+    // padIndex. `currentKit` passed in is already bankKitIdx()-aware, but
+    // this screen has no access to bankMode/nativeSlotsFor() itself to
+    // compute the matching native slot(s) when Bank B/A+B is active.
+    // Defaults to the old raw-padIndex behavior so any other caller not yet
+    // passing this still compiles and behaves as before.
+    invalidateNativePads: (padIndex: Int) -> List<Int> = { listOf(it) }
 ) {
     val context = LocalContext.current
 
@@ -53,8 +62,10 @@ fun ImportScreen(
     fun assignToTargetPad(audioId: Long) {
         val pad = targetPad ?: return
         AudioRepository.assignPadToKit(audioId, pad, currentKit)
-        DrumEngine.invalidatePad(pad)
-        DrumEngine.loadPad(context, currentKit, pad, targetPadDefaultResId)
+        invalidateNativePads(pad).forEach { slot ->
+            DrumEngine.invalidatePad(slot)
+            DrumEngine.loadPad(context, currentKit, pad, targetPadDefaultResId, nativeSlot = slot)
+        }
     }
 
     var pendingVideoUri by remember { mutableStateOf<Uri?>(null) }

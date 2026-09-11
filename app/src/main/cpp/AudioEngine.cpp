@@ -230,6 +230,21 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
     buffers_[padIndex].sampleRate = sampleRate;
     buffers_[padIndex].loaded     = true;
 
+    // BUG FIX (code review, 2026-09-11): a BPM-stretched copy of this pad's
+    // PREVIOUS sample can still be sitting in stretchedBuffers_[padIndex]
+    // (see setPadLoopStretch/wsolaStretch) with `loaded == true`. Without
+    // this, Kotlin's ratio-based cache (lastLoopStretchKey) can decide the
+    // new sample's stretch ratio "hasn't changed" from the old one's — quite
+    // possible, since ratio is just beatIntervalMs/durationToShow and many
+    // samples share similar lengths — and skip calling setPadLoopStretch
+    // again entirely, leaving triggerPad() to keep playing the OLD sample's
+    // stretched audio on every loop retrigger of the NEWLY loaded one.
+    // Dropping the stale cache here (independent of whatever Kotlin's own
+    // cache decides) means a loop always at least falls back to the new
+    // sample's raw audio until something pushes a fresh stretch for it.
+    stretchedBuffers_[padIndex].loaded = false;
+    bufferGeneration_[padIndex]++;
+
     LOGD("Loaded pad %d: %d frames @ %dHz", padIndex, numFrames, sampleRate);
 }
 
@@ -238,6 +253,7 @@ void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
 
     std::vector<float> srcCopy;
     int channels = 0, sampleRate = 0;
+    uint32_t generationBefore = 0;
     {
         std::lock_guard<std::mutex> lock(bufferMutex_);
         if (!buffers_[padIndex].loaded) return;
@@ -251,6 +267,7 @@ void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
         srcCopy    = buffers_[padIndex].samples; // cheap copy; heavy work happens unlocked below
         channels   = buffers_[padIndex].channels;
         sampleRate = buffers_[padIndex].sampleRate;
+        generationBefore = bufferGeneration_[padIndex]; // captured under the same lock, not after releasing it
     }
 
     // The actual WSOLA pass — frame-by-frame correlation search, genuinely
@@ -262,7 +279,17 @@ void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
     std::lock_guard<std::mutex> lock(bufferMutex_);
     // If the pad's sample was reloaded (kit/patch change) while we were
     // stretching the old one, don't publish a stretch of stale audio.
-    if (!buffers_[padIndex].loaded) return;
+    //
+    // BUG FIX (code review, 2026-09-11): checking only `buffers_[padIndex].
+    // loaded` doesn't catch this — `loaded` stays true across a reload (it's
+    // now pointing at the NEW sample), so a race where loadPadBuffer() ran
+    // while this function's unlocked WSOLA pass was still computing used to
+    // sail through this check and publish a stretch computed from the OLD
+    // sample's data, mislabeled as valid for the newly-loaded content.
+    // bufferGeneration_ is bumped by loadPadBuffer() on every reload, so
+    // comparing it catches a reload that happened mid-computation even
+    // though `loaded` alone can't tell the two states apart.
+    if (!buffers_[padIndex].loaded || bufferGeneration_[padIndex] != generationBefore) return;
     stretchedBuffers_[padIndex].samples    = std::move(stretched);
     stretchedBuffers_[padIndex].channels   = channels;
     stretchedBuffers_[padIndex].sampleRate = sampleRate;
@@ -852,10 +879,29 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
 
             // Low-pass (low shelf)
             lpState_[ch]  += alpha_lp * (x - lpState_[ch]);
+            // Anti-denormal flush ("der tak bajane pe khich khich" — crackle
+            // after playing for a while): this filter runs on EVERY callback,
+            // continuously, whether or not any pad is actually sounding —
+            // during a silent gap between hits its state decays toward 0.0f
+            // asymptotically and passes through, then lingers in, the
+            // denormal float range (~1e-38 down to ~1e-45) for many
+            // callbacks before ever reaching exact zero. Denormal float math
+            // is a well-documented 10-100x slower path on many ARM/x86 FPUs
+            // without flush-to-zero enabled — on the audio callback thread
+            // that's a real risk of missing the callback deadline, heard as
+            // exactly this: an intermittent glitch that shows up more the
+            // longer/quieter a session runs, and inconsistently across
+            // devices (depends on that CPU's denormal handling). Once a
+            // state's magnitude is inaudibly small (~-300dB, nowhere near
+            // affecting the mix), snap it to exact 0.0f instead of letting
+            // it keep decaying through denormal territory.
+            if (fabsf(lpState_[ch]) < 1e-15f) lpState_[ch] = 0.0f;
             float low      = lpState_[ch];
 
-            // Low-pass at high cutoff (used to separate mid from high)
+            // Low-pass at high cutoff (used to separate mid from high) —
+            // same anti-denormal flush as lpState_ above, same reasoning.
             bp1State_[ch] += alpha_hp * (x - bp1State_[ch]);
+            if (fabsf(bp1State_[ch]) < 1e-15f) bp1State_[ch] = 0.0f;
             float high     = x - bp1State_[ch];
             float mid      = x - low - high;
 

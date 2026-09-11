@@ -708,12 +708,25 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // BPM loop-stretch (client request: BPM should change a looping pad's OWN
     // duration, pitch-preserving, not just how often it retriggers — see
     // fire()/wait-loop below). Native's setPadLoopStretch() is real per-call
-    // CPU work (WSOLA), so this caches the last ratio actually pushed per
-    // native slot and skips the call when it hasn't materially changed —
-    // otherwise every single retrigger of an already-stable loop would redo
-    // the stretch for no reason. Plain (non-Compose-state) map: nothing here
-    // needs to trigger recomposition, it's read/written only from fire().
-    val lastLoopStretchRatio = remember { mutableMapOf<Int, Float>() }
+    // CPU work (WSOLA), so this caches the last (sample identity, ratio)
+    // actually pushed per native slot and skips the call only when BOTH
+    // match — otherwise every single retrigger of an already-stable loop
+    // would redo the stretch for no reason.
+    //
+    // BUG FIX (code review, 2026-09-11): this used to cache ratio alone. If
+    // the sample assigned to a slot changed (kit switch, or a re-crop/
+    // re-import onto the same pad) but the new sample's stretch ratio
+    // happened to coincide with the previous one's — plausible, since ratio
+    // is just beatIntervalMs/durationToShow and many samples share similar
+    // durations — the ratio-only check saw "unchanged" and skipped the
+    // native call entirely, silently leaving the OLD sample's stretched
+    // buffer in stretchedBuffers_[slot] to keep playing back regardless of
+    // what the pad was actually reassigned to. Keying on sample identity too
+    // forces a fresh stretch whenever the underlying audio itself changes,
+    // independent of what the ratio happens to be. Plain (non-Compose-state)
+    // map: nothing here needs to trigger recomposition, read/written only
+    // from fire().
+    val lastLoopStretchKey = remember { mutableMapOf<Int, Pair<Long, Float>>() }
 
     /**
      * @param velocityMultiplier  0f..1f — how hard the pad was hit.
@@ -915,6 +928,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             NativeBridge.setDelayChokePad(delayChokePad)
         }
 
+        // BPM loop-stretch (client request, 2026-09-11): "BPM me tone ki
+        // speed km/jyada ho, quality same rahe" — BPM should change how long
+        // a looping pad's OWN playback takes, pitch-preserving, distinct
+        // from the PITCH knob's varispeed (which deliberately changes tone
+        // character — "mota patla" — as speed changes). Returns null when
+        // the pad isn't looping at all, OR (code review, 2026-09-11) when
+        // `dur` is too short for native's WSOLA to actually stretch —
+        // wsolaStretch's own analysis frame is ~25ms, and below that it
+        // silently returns the ORIGINAL unstretched audio while still
+        // reporting `loaded = true`. Without this floor, a cropped/short
+        // loop pad would ask the wait-loop to wait the ideal (never-
+        // achieved) stretched duration while native actually played the
+        // raw, shorter one — an audible dead-air gap before the next
+        // retrigger. Shared by fire() and the wait-loop below so the ratio
+        // formula can't drift between the two (they used to each compute it
+        // separately).
+        fun loopStretchRatioFor(dur: Long): Float? {
+            if (!effectiveLoop() || dur < 30L) return null
+            val beatIntervalMs =
+                (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
+            return (beatIntervalMs.toFloat() / dur.toFloat()).coerceIn(0.25f, 4.0f)
+        }
+
         // Fires the actual native trigger + updates the LCD/choke bookkeeping
         // for one hit. Used both for the immediate first hit (below) and for
         // each subsequent loop re-trigger inside the coroutine.
@@ -924,36 +960,53 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             playbackDurationMs = durationToShow
             playbackPositionMs = 0L
 
-            // BPM loop-stretch (client request, 2026-09-11): "BPM me tone ki
-            // speed km/jyada ho, quality same rahe" — BPM should change how
-            // long a looping pad's OWN playback takes, pitch-preserving,
-            // distinct from the PITCH knob's varispeed (which deliberately
-            // changes tone character — "mota patla" — as speed changes).
-            // Computed here (not just in the wait-loop below) because it has
-            // to reach native BEFORE this same fire() call's trigger() below,
-            // same ordering reason syncDelayForHit() runs before trigger.
-            val loopStretchRatio: Float? = if (effectiveLoop()) {
-                val beatIntervalMs =
-                    (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
-                (beatIntervalMs.toFloat() / durationToShow.toFloat()).coerceIn(0.25f, 4.0f)
-            } else null
-
             bankSlots.forEach { slot ->
                 val kitForSlot = when {
                     slot >= 8  -> currentKitB
                     else       -> currentKit
                 }
                 if (kitForSlot in kits.indices) {
+                    // BUG FIX (code review, 2026-09-11): the stretch ratio
+                    // used to be computed ONCE from durationToShow (which is
+                    // always the "primary" bank's sample — see bankKitIdx()'s
+                    // A-precedence), then pushed unchanged to EVERY bankSlot,
+                    // including a layered Bank B slot in "AB" mode. Bank B's
+                    // own sample can be a completely different length, so
+                    // that ratio (correct only for the primary bank) stretched
+                    // Bank B's audio to the wrong duration entirely — e.g. a
+                    // 500ms Bank-A-derived ratio applied to a 2000ms Bank B
+                    // sample. Each slot's stretch is now computed from THAT
+                    // slot's own kit's own sample duration (raw duration ×
+                    // that kit's own crop span), not the closed-over
+                    // durationToShow. (The wait-loop's overall retrigger
+                    // timing below is still governed by the primary bank's
+                    // duration — a separate, pre-existing limitation of
+                    // sharing one retrigger clock across layered banks that
+                    // predates BPM-stretch; not solved here.)
+                    val slotAssigned = AudioRepository.audioForPad(kitForSlot, index)
+                    val slotFactoryResId = kits[kitForSlot].sounds.getOrElse(index) { -1 }
+                    val slotRawDurationMs = slotAssigned?.durationMs
+                        ?: com.example.myapplication.ui.audio.PadDurationCache.get(slotFactoryResId)
+                        ?: DEFAULT_PAD_DURATION_MS
+                    val slotCropSpan = (kits[kitForSlot].padLengthPct.getOrElse(index) { 1f } -
+                            kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f }).coerceIn(0.02f, 1f)
+                    val slotDurationMs = (slotRawDurationMs * slotCropSpan).toLong().coerceAtLeast(1L)
+                    val loopStretchRatio: Float? = loopStretchRatioFor(slotDurationMs)
+
                     // Only push a fresh WSOLA stretch to native when the
-                    // ratio actually changed for this slot — recomputing it
-                    // on every single retrigger of an already-stable loop
-                    // would redo real CPU work (frame correlation search)
-                    // for an identical result every beat.
-                    if (loopStretchRatio != null &&
-                        kotlin.math.abs((lastLoopStretchRatio[slot] ?: Float.NaN) - loopStretchRatio) > 0.01f
-                    ) {
-                        DrumEngine.setLoopStretch(slot, loopStretchRatio)
-                        lastLoopStretchRatio[slot] = loopStretchRatio
+                    // sample identity OR the ratio actually changed for this
+                    // slot — recomputing on every single retrigger of an
+                    // already-stable loop would redo real CPU work (frame
+                    // correlation search) for an identical result every beat.
+                    if (loopStretchRatio != null) {
+                        val sampleIdentity = slotAssigned?.id ?: slotFactoryResId.toLong()
+                        val cached = lastLoopStretchKey[slot]
+                        if (cached == null || cached.first != sampleIdentity ||
+                            kotlin.math.abs(cached.second - loopStretchRatio) > 0.01f
+                        ) {
+                            DrumEngine.setLoopStretch(slot, loopStretchRatio)
+                            lastLoopStretchKey[slot] = sampleIdentity to loopStretchRatio
+                        }
                     }
                     DrumEngine.trigger(
                         slot,
@@ -991,8 +1044,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // too). SPEED does NOT touch pitch — that's the PITCH
                     // knob's job (varispeed stays removed, see fire()).
                     //
-                    // beatIntervalMs = 60000 / BPM / SPEED.
-                    //
                     // BUG FIX / feature change (client, 2026-09-11): "BPM me
                     // tone ki quality same rahe, sirf speed/duration badle" —
                     // the old `maxOf(beatIntervalMs, durationToShow)` floor
@@ -1002,16 +1053,21 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     // native (see setPadLoopStretch) that resizes the sample
                     // itself to fit the beat — so the floor is gone, and the
                     // wait window matches exactly what native was told to
-                    // stretch to (same 0.25x-4x clamp fire() uses), keeping
-                    // this coroutine's retrigger timing in lockstep with the
-                    // actually-playing (possibly stretched) audio instead of
-                    // drifting from it.
-                    val beatIntervalMs =
-                        (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f))
-                            .toLong().coerceAtLeast(50L)
-                    val waitWindowMs = if (effectiveLoop()) {
-                        val ratio = (beatIntervalMs.toFloat() / durationToShow.toFloat()).coerceIn(0.25f, 4.0f)
-                        (durationToShow * ratio).toLong().coerceAtLeast(50L)
+                    // stretch to.
+                    //
+                    // BUG FIX (code review, 2026-09-11): this used to
+                    // re-derive the ratio inline, separately from fire()'s
+                    // copy of the same formula — two places that had to
+                    // agree, easy to let drift on a future tweak. Now shares
+                    // loopStretchRatioFor() (declared above, near fire()),
+                    // which also floors out samples too short for WSOLA to
+                    // actually stretch (returns null there, same as "not
+                    // looping" — wait window then correctly falls back to
+                    // the pad's own raw duration, matching what native
+                    // actually played instead of a never-achieved stretch).
+                    val loopRatio = loopStretchRatioFor(durationToShow)
+                    val waitWindowMs = if (loopRatio != null) {
+                        (durationToShow * loopRatio).toLong().coerceAtLeast(50L)
                     } else durationToShow
 
                     val startTime = System.currentTimeMillis()
@@ -2647,7 +2703,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     targetPad = importTargetPad,
                     targetPadDefaultResId = importTargetPad?.let {
                         kits[importKitIdx].sounds.getOrElse(it) { -1 }
-                    } ?: -1
+                    } ?: -1,
+                    // BUG FIX (code review, 2026-09-11): this screen used to
+                    // reload native pad slot == padIndex unconditionally —
+                    // correct only for Bank A. Routed through nativeSlotsFor()
+                    // so a Bank B/A+B import reloads the right native slot(s).
+                    invalidateNativePads = { nativeSlotsFor(it) }
                 )
             }
 
@@ -2656,7 +2717,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 AudioListScreen(
                     currentKit = audiosKitIdx,
                     factoryResIds = kits[audiosKitIdx].sounds,
-                    onClose = { topPanel = "" }
+                    onClose = { topPanel = "" },
+                    // Same nativeSlotsFor() fix as ImportScreen above.
+                    invalidateNativePads = { nativeSlotsFor(it) }
                 )
             }
 
@@ -2673,6 +2736,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     padIndex = selectedPad,
                     factoryResId = kits[editKitIdx].sounds.getOrElse(selectedPad) { -1 },
                     onClose  = { topPanel = "" },
+                    // Same nativeSlotsFor() fix as ImportScreen/AudioListScreen.
+                    invalidateNativePads = { nativeSlotsFor(it) },
                     // Same one-tap import flow EQPanel's "IMPORT TO THIS PAD"
                     // already uses — no import logic duplicated.
                     onPickNewSound = { importTargetPad = selectedPad; topPanel = "IMPORT" },

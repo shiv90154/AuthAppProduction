@@ -147,6 +147,13 @@ private:
     // whenever a Voice has useStretchedBuffer set. Guarded by the same
     // bufferMutex_ as buffers_ itself.
     std::array<PadBuffer, kMaxPads>    stretchedBuffers_;
+    // Bumped every time loadPadBuffer() replaces a pad's raw sample.
+    // setPadLoopStretch() captures this before its (unlocked) WSOLA pass and
+    // refuses to publish into stretchedBuffers_ if it changed in the
+    // meantime — otherwise a kit switch racing a still-in-flight stretch
+    // computation could publish a stretch of the OLD sample's data,
+    // mislabeled as valid for whatever just got loaded.
+    std::array<uint32_t, kMaxPads>     bufferGeneration_{};
     std::array<Voice, kMaxVoices>      voices_;
     std::mutex  bufferMutex_;
     int         outputSampleRate_ = 48000;

@@ -100,7 +100,16 @@ fun WaveformEditorScreen(
     // (startPct, endPct) changed, no file rewrite. destructive=true → a
     // DELETE-region cut was applied and the file itself was rewritten to
     // the trimmed clip, so the caller should reset its crop window to full.
-    onCommitCrop: (startPct: Float, endPct: Float, destructive: Boolean) -> Unit = { _, _, _ -> }
+    onCommitCrop: (startPct: Float, endPct: Float, destructive: Boolean) -> Unit = { _, _, _ -> },
+    // BUG FIX (code review, 2026-09-11): applyPending() used to reload the
+    // native pad via a bare DrumEngine.invalidatePad(padIndex) — correct
+    // only while Bank A is active. `kitIndex` is already bankKitIdx()-aware
+    // from the caller, but this screen has no access to bankMode/
+    // nativeSlotsFor() itself to compute the matching native slot(s). The
+    // caller now passes that mapping in; defaults to the old raw-padIndex
+    // behavior so any other/future caller not yet updated still compiles
+    // and behaves as before.
+    invalidateNativePads: (padIndex: Int) -> List<Int> = { listOf(it) }
 ) {
     val context = LocalContext.current
 
@@ -235,8 +244,10 @@ fun WaveformEditorScreen(
             // edited/cropped audio was saved to the repository but the pad
             // kept playing the OLD pre-edit sound until something unrelated
             // (a kit switch, an app restart) forced a reload.
-            DrumEngine.invalidatePad(padIndex)
-            DrumEngine.loadPad(context, kitIndex, padIndex, factoryResId)
+            invalidateNativePads(padIndex).forEach { slot ->
+                DrumEngine.invalidatePad(slot)
+                DrumEngine.loadPad(context, kitIndex, padIndex, factoryResId, nativeSlot = slot)
+            }
             saveMsg = "Saved"
             hasUserEdited = false
             // Refresh pcm + amplitudes for the newly saved audio, and reset

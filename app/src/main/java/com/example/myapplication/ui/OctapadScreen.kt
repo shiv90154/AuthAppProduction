@@ -721,29 +721,6 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
 
 
-    // BPM loop-stretch (client request: BPM should change a looping pad's OWN
-    // duration, pitch-preserving, not just how often it retriggers — see
-    // fire()/wait-loop below). Native's setPadLoopStretch() is real per-call
-    // CPU work (WSOLA), so this caches the last (sample identity, ratio)
-    // actually pushed per native slot and skips the call only when BOTH
-    // match — otherwise every single retrigger of an already-stable loop
-    // would redo the stretch for no reason.
-    //
-    // BUG FIX (code review, 2026-09-11): this used to cache ratio alone. If
-    // the sample assigned to a slot changed (kit switch, or a re-crop/
-    // re-import onto the same pad) but the new sample's stretch ratio
-    // happened to coincide with the previous one's — plausible, since ratio
-    // is just beatIntervalMs/durationToShow and many samples share similar
-    // durations — the ratio-only check saw "unchanged" and skipped the
-    // native call entirely, silently leaving the OLD sample's stretched
-    // buffer in stretchedBuffers_[slot] to keep playing back regardless of
-    // what the pad was actually reassigned to. Keying on sample identity too
-    // forces a fresh stretch whenever the underlying audio itself changes,
-    // independent of what the ratio happens to be. Plain (non-Compose-state)
-    // map: nothing here needs to trigger recomposition, read/written only
-    // from fire().
-    val lastLoopStretchKey = remember { mutableMapOf<Int, Pair<Long, Float>>() }
-
     /**
      * @param velocityMultiplier  0f..1f — how hard the pad was hit.
      *   1f = full volume (touch-triggered pads always use 1f).
@@ -944,27 +921,27 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             NativeBridge.setDelayChokePad(delayChokePad)
         }
 
-        // BPM loop-stretch RESTORED, clamp tightened (client override,
-        // 2026-09-12 — reverses the previous "always null" change from
-        // earlier the same day): client reported the auto-stretch removal
-        // went too far — "BPM wala effect abhi koi kaam nahi kar raha, speed
-        // bhi kaam nahi kar rahi" (BPM/SPEED now doing nothing) — BPM was
-        // "roughly 50% right" before, the actual complaint being the ratio
-        // occasionally overshooting to a very fast speed, not that BPM
-        // shouldn't affect loop speed at all. Restored the same
-        // beatIntervalMs/sampleDuration formula, but the clamp is tightened
-        // from 0.25x–4x to 0.5x–2x — a loop pad can still speed up or slow
-        // down to sync with BPM, just capped at half/double instead of
-        // quarter/quadruple, which is what produced the "bahut jyada fast"
-        // complaint at default 120 BPM against a several-second loop sample.
-        // Manual slow-down/speed-up is still separately available via the
-        // PITCH −10/−1/+1/+10 steppers (pitch is sent to native
-        // unconditionally, independent of this function).
-        fun loopStretchRatioFor(dur: Long): Float? {
-            if (!effectiveLoop() || dur < 30L) return null
-            val beatIntervalMs =
-                (60_000f / bpm.coerceAtLeast(1) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
-            return (beatIntervalMs.toFloat() / dur.toFloat()).coerceIn(0.5f, 2.0f)
+        // BPM redefined as pure RETRIGGER RATE, WSOLA time-stretch removed
+        // entirely (client override, 2026-09-12, final pass — supersedes
+        // both same-day BPM entries above): client sent the textbook
+        // definition of BPM — "60 BPM = 1 second mein 1 beat, 120 BPM = 1
+        // second mein 2 beats... BPM badhao to beat/loop tez hoga, ghatao to
+        // dheema" — i.e. BPM controls how OFTEN a looping pad retriggers,
+        // full stop. It says nothing about changing the sample's own
+        // playback speed/pitch, which is exactly what every WSOLA-stretch
+        // iteration today kept doing (and kept causing "quality kharab ho
+        // jaati hai, bahut fast baj raha hai" complaints, however tightly
+        // the ratio was clamped) — the sample itself was always being sped
+        // up or compressed to fit the beat. Removing the stretch mechanism
+        // entirely is the only way to guarantee the sample's own audio is
+        // NEVER altered by BPM: the sample always plays at its own normal
+        // recorded speed; BPM only changes the gap between repeats.
+        // loopBeatIntervalMs() is the new pure-retrigger-rate helper —
+        // `null` here means "not looping," matching every other call site's
+        // existing null-check.
+        fun loopBeatIntervalMs(): Long? {
+            if (!effectiveLoop()) return null
+            return (60_000f / bpm.coerceIn(40, 300) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
         }
 
         // Fires the actual native trigger + updates the LCD/choke bookkeeping
@@ -982,48 +959,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     else       -> currentKit
                 }
                 if (kitForSlot in kits.indices) {
-                    // BUG FIX (code review, 2026-09-11): the stretch ratio
-                    // used to be computed ONCE from durationToShow (which is
-                    // always the "primary" bank's sample — see bankKitIdx()'s
-                    // A-precedence), then pushed unchanged to EVERY bankSlot,
-                    // including a layered Bank B slot in "AB" mode. Bank B's
-                    // own sample can be a completely different length, so
-                    // that ratio (correct only for the primary bank) stretched
-                    // Bank B's audio to the wrong duration entirely — e.g. a
-                    // 500ms Bank-A-derived ratio applied to a 2000ms Bank B
-                    // sample. Each slot's stretch is now computed from THAT
-                    // slot's own kit's own sample duration (raw duration ×
-                    // that kit's own crop span), not the closed-over
-                    // durationToShow. (The wait-loop's overall retrigger
-                    // timing below is still governed by the primary bank's
-                    // duration — a separate, pre-existing limitation of
-                    // sharing one retrigger clock across layered banks that
-                    // predates BPM-stretch; not solved here.)
-                    val slotAssigned = AudioRepository.audioForPad(kitForSlot, index)
-                    val slotFactoryResId = kits[kitForSlot].sounds.getOrElse(index) { -1 }
-                    val slotRawDurationMs = slotAssigned?.durationMs
-                        ?: com.example.myapplication.ui.audio.PadDurationCache.get(slotFactoryResId)
-                        ?: DEFAULT_PAD_DURATION_MS
-                    val slotCropSpan = (kits[kitForSlot].padLengthPct.getOrElse(index) { 1f } -
-                            kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f }).coerceIn(0.02f, 1f)
-                    val slotDurationMs = (slotRawDurationMs * slotCropSpan).toLong().coerceAtLeast(1L)
-                    val loopStretchRatio: Float? = loopStretchRatioFor(slotDurationMs)
-
-                    // Only push a fresh WSOLA stretch to native when the
-                    // sample identity OR the ratio actually changed for this
-                    // slot — recomputing on every single retrigger of an
-                    // already-stable loop would redo real CPU work (frame
-                    // correlation search) for an identical result every beat.
-                    if (loopStretchRatio != null) {
-                        val sampleIdentity = slotAssigned?.id ?: slotFactoryResId.toLong()
-                        val cached = lastLoopStretchKey[slot]
-                        if (cached == null || cached.first != sampleIdentity ||
-                            kotlin.math.abs(cached.second - loopStretchRatio) > 0.01f
-                        ) {
-                            DrumEngine.setLoopStretch(slot, loopStretchRatio)
-                            lastLoopStretchKey[slot] = sampleIdentity to loopStretchRatio
-                        }
-                    }
+                    // WSOLA loop-stretch removed entirely (2026-09-12, final
+                    // pass) — BPM no longer alters the sample's own audio in
+                    // any way (see loopBeatIntervalMs()'s comment); every hit,
+                    // looping or not, just plays the raw buffer at its own
+                    // pitch/rate. useLoopStretch is always false now.
                     DrumEngine.trigger(
                         slot,
                         kits[kitForSlot].volumes[index] * effectiveVelocity,
@@ -1033,7 +973,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
                         gain = kits[kitForSlot].padGain.getOrElse(index) { 1f },
                         startFraction = kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f },
-                        useLoopStretch = loopStretchRatio != null
+                        useLoopStretch = false
                     )
                 }
             }
@@ -1054,36 +994,23 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 var keepGoing = true
 
                 while (keepGoing) {
-                    // Loop tempo (client override, 2026-09-08, revised
-                    // 2026-09-11): BPM is the base beat rate; SPEED is a
-                    // fine-tune multiplier around it (0.9x-1.1x, clamped here
-                    // too). SPEED does NOT touch pitch — that's the PITCH
-                    // knob's job (varispeed stays removed, see fire()).
-                    //
-                    // BUG FIX / feature change (client, 2026-09-11): "BPM me
-                    // tone ki quality same rahe, sirf speed/duration badle" —
-                    // the old `maxOf(beatIntervalMs, durationToShow)` floor
-                    // existed only because a sample longer than one beat used
-                    // to have nowhere to go but get cut off mid-playback.
-                    // fire() now pushes a pitch-preserving WSOLA stretch to
-                    // native (see setPadLoopStretch) that resizes the sample
-                    // itself to fit the beat — so the floor is gone, and the
-                    // wait window matches exactly what native was told to
-                    // stretch to.
-                    //
-                    // BUG FIX (code review, 2026-09-11): this used to
-                    // re-derive the ratio inline, separately from fire()'s
-                    // copy of the same formula — two places that had to
-                    // agree, easy to let drift on a future tweak. Now shares
-                    // loopStretchRatioFor() (declared above, near fire()),
-                    // which also floors out samples too short for WSOLA to
-                    // actually stretch (returns null there, same as "not
-                    // looping" — wait window then correctly falls back to
-                    // the pad's own raw duration, matching what native
-                    // actually played instead of a never-achieved stretch).
-                    val loopRatio = loopStretchRatioFor(durationToShow)
-                    val waitWindowMs = if (loopRatio != null) {
-                        (durationToShow * loopRatio).toLong().coerceAtLeast(50L)
+                    // Loop tempo, pure retrigger-rate BPM (client override,
+                    // 2026-09-12, final pass — see loopBeatIntervalMs()'s
+                    // comment near fire() for the full "why"): BPM only
+                    // controls how often the pad retriggers, never the
+                    // sample's own playback speed. The `maxOf(beatIntervalMs,
+                    // durationToShow)` floor means a high BPM can never cut a
+                    // sample short or speed it up — retrigger happens the
+                    // instant the sample naturally finishes, capped at "as
+                    // fast as the sample's own length allows." A low BPM
+                    // simply adds a silent gap before the next repeat, which
+                    // is the correct, literal "BPM ghatao to loop dheema"
+                    // behavior. SPEED remains a separate fine-tune multiplier
+                    // (0.9x-1.1x) folded into the same beat-interval formula;
+                    // it does NOT touch pitch — that's the PITCH knob's job.
+                    val beatIntervalMs = loopBeatIntervalMs()
+                    val waitWindowMs = if (beatIntervalMs != null) {
+                        maxOf(beatIntervalMs, durationToShow)
                     } else durationToShow
 
                     val startTime = System.currentTimeMillis()

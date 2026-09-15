@@ -77,7 +77,10 @@ fun ActivationScreen(onActivated: () -> Unit) {
     var serverUrl by remember {
         mutableStateOf(
             LicenseRepository.getServerUrl(context).ifBlank {
-                "https://octapad-adminpanel-final.vercel.app"
+                // Moved off Vercel to a self-hosted VPS (2026-09-15) — see
+                // admin-panel/README.md's "Deploying" section. Plain HTTP,
+                // no domain yet, so this is an IP:port, not https://.
+                "http://201.18.192.179:3002"
             }
         )
     }

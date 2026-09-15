@@ -26,7 +26,7 @@ object LicenseToken {
     // and be aware rotating it invalidates every already-activated device's
     // stored signature until it next successfully reaches /api/app/status.
     private const val PUBLIC_KEY_B64 =
-        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE31fPbrpVmBDZjCI8hq2orZfSYJR9E9szey8bqcyDMiI/xIlN8/kpmUcPgNp1akZqxmSD1AkwqaYre5GASx+4Lw=="
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAED3KemAW/9GZ+dDGuSgsqWzCw0rt0SUU6Yhe1E/CpZ9m/OaRk6BVES4B3GYFf0fZZWVI+tnRvk2tYg0LbDPXpAA=="
 
     private val publicKey: PublicKey by lazy {
         val bytes = Base64.decode(PUBLIC_KEY_B64, Base64.DEFAULT)

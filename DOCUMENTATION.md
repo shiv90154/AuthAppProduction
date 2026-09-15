@@ -283,9 +283,9 @@ Full step-by-step (including how to get a free MongoDB Atlas connection string) 
 
 **For the Android app to actually reach this**, `localhost` won't work from a phone. Either:
 1. Run it locally (`npm run dev`) and use your laptop's LAN IP (e.g. `http://192.168.1.42:3000`) as the Server URL on the app's activation screen — phone and laptop need to be on the same WiFi.
-2. Deploy it (Vercel is easiest: `npx vercel` from inside `admin-panel/`), with `MONGODB_URI` and `ADMIN_PASSWORD` set as environment variables there too, and use the public URL.
+2. Deploy it — as of 2026-09-15 the primary path is a self-hosted VPS via Docker (`docker compose up -d --build` in `admin-panel/`, see §4's changelog entry and `admin-panel/README.md`), or Vercel as before (`npx vercel`) — either way with `MONGODB_URI_MONGODB_URI` and `ADMIN_PASSWORD` set as environment variables there too, and use the public URL/IP.
 
-Either way, a real MongoDB Atlas connection string is required — without it, every `/api/app/*` call 500s.
+Either way, a real MongoDB connection string is required (Atlas, or the self-hosted `mongo` Docker container) — without it, every `/api/app/*` call 500s.
 
 ### 2.7 Connected to the Android app
 
@@ -313,6 +313,17 @@ npm run build       # production build check
 ---
 
 ## 4. Changelog
+
+**Admin panel moved off Vercel to a self-hosted Hostinger VPS via Docker; MongoDB self-hosted too, replacing Atlas (2026-09-15)**
+
+Client wanted full control of the hosting and database instead of depending on Vercel's/Atlas's free tiers, and already had Docker running on a Hostinger VPS.
+
+- **`admin-panel/Dockerfile`** (new): multi-stage build — `npm ci` in a `deps` stage, `npm run build` in a `builder` stage, then a minimal `node:20-alpine` runner that copies only `.next/standalone` + `.next/static` + `public` (needs `next.config.ts`'s new `output: "standalone"`, also added this pass — without it there's no `.next/standalone` to copy and the whole multi-stage split loses its point). Runs as a non-root `nextjs` user.
+- **`admin-panel/docker-compose.yml`** (new): two services — `app` (built from the Dockerfile, port 3000) and `mongo` (official `mongo:7` image, root credentials from env vars, data in a named `mongo_data` volume so it survives `docker compose down`/`up`, not `expose`d to the host — only the `app` container can reach it). `.env.docker.example` documents the vars a real `.env` on the VPS needs (`MONGO_ROOT_USER`/`MONGO_ROOT_PASSWORD`/`ADMIN_PASSWORD`/`LICENSE_SIGNING_PRIVATE_KEY_B64`).
+- **No domain/HTTPS yet** — client chose to run on `http://VPS_IP:3000` for now (matches the Android app's existing `usesCleartextTraffic` setup, so nothing on the app side needed to change). Putting Nginx/Caddy + Let's Encrypt in front is future work once a domain is pointed at the VPS.
+- **Fixed a pre-existing docs bug while touching this**: `.env.local.example` said `MONGODB_URI=...` but `lib/mongodb.ts` actually reads `MONGODB_URI_MONGODB_URI` — anyone copying that example literally would have gotten the "MONGODB_URI_MONGODB_URI is not set" throw. Corrected the example and added the matching var to the new `.env.docker.example`.
+- **Verified end-to-end locally** (Docker Desktop was available in this environment, unlike the Android SDK): `docker build` succeeds, and a full `mongo:7` + built app container pair was started manually (bypassing the port-3000 conflict from an already-running local dev server) and smoke-tested — `/login` renders, `POST /api/login` with the configured `ADMIN_PASSWORD` sets a working session cookie, `GET /api/licenses` (Mongo-backed, session-gated) returns `200 {"licenses":[]}`, and the public `GET /api/app/version` returns `200` with the AppVersion route's no-doc-yet fallback — confirming the app container, the self-hosted Mongo container, and the session/auth path all actually work together, not just that the image builds. Not yet run on the actual Hostinger VPS itself — the commands in `admin-panel/README.md`'s "Deploying → Self-hosted on a VPS with Docker" section are the next step there.
+- `admin-panel/README.md` and `CLAUDE.md` updated with the VPS deployment steps (including a `mongodump` backup command — self-hosting means there's no automatic managed backup Atlas used to provide) and Vercel is documented as a still-working fallback path, not removed.
 
 **In-app update check added: admin panel publishes a version, the app prompts/forces an update (2026-09-15)**
 

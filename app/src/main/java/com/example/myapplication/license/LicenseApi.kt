@@ -13,7 +13,12 @@ data class LicenseResult(
     val active: Boolean = false,
     val midiPurchased: Boolean = false,
     val reason: String? = null,   // "INVALID_CODE" | "DEACTIVATED" | "ALREADY_USED" | "NOT_BOUND" | network error message
-    val httpFailure: Boolean = false // true = couldn't reach the server at all (offline / bad URL)
+    val httpFailure: Boolean = false, // true = couldn't reach the server at all (offline / bad URL)
+    // Server-signed proof of (deviceId, code, active, midiPurchased, exp) —
+    // see LicenseToken.verify(). Null on old-server responses that predate
+    // signing, or on any failure response that carries no license state.
+    val exp: Long? = null,
+    val sig: String? = null
 )
 
 object LicenseApi {
@@ -66,7 +71,9 @@ object LicenseApi {
             ok = ok,
             active = obj.optBoolean("active", false),
             midiPurchased = obj.optBoolean("midiPurchased", false),
-            reason = if (obj.has("reason")) obj.getString("reason") else null
+            reason = if (obj.has("reason")) obj.getString("reason") else null,
+            exp = if (obj.has("exp")) obj.getLong("exp") else null,
+            sig = if (obj.has("sig")) obj.getString("sig") else null
         )
     }
 

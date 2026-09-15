@@ -116,6 +116,12 @@ data class Kit(
 // timing logic keeps working exactly as before for pads with no custom audio.
 const val DEFAULT_PAD_DURATION_MS = 500L
 
+// BPM pitch-preserving time-stretch reference tempo — 120 BPM is "normal"
+// (stretch ratio 1.0, sample plays at its own recorded speed); matches
+// PreferencesRepository's existing default BPM. See stretchRatio() in
+// onPadHit() for the full formula/history.
+const val REFERENCE_BPM = 120f
+
 // Bank A and Bank B each have their OWN separate 200-slot kit pool again
 // (client override, 2026-09-12 — reverses the 2026-09-11 "share ONE pool"
 // change): "A and B bank mein 200-200 chahiye, A bank ka patch B mein merge
@@ -162,6 +168,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
             }
             delay(30 * 60 * 1000L) // recheck every 30 minutes while the app stays open
+        }
+    }
+
+    // NEW: one-shot check against the admin panel's published APK version
+    // (see admin-panel's "App Update" dashboard tab / /api/app/version).
+    // Fires once per app open rather than joining the 30-minute license
+    // loop above — an update prompt reappearing every 30 minutes while the
+    // user is mid-session would be disruptive; re-checking on next launch
+    // is enough.
+    var pendingUpdate by remember { mutableStateOf<com.example.myapplication.update.AppUpdateInfo?>(null) }
+    LaunchedEffect(Unit) {
+        val serverUrl = com.example.myapplication.license.LicenseRepository.getServerUrl(context)
+        if (serverUrl.isBlank()) return@LaunchedEffect
+        val info = com.example.myapplication.update.AppUpdateApi.fetchLatest(serverUrl) ?: return@LaunchedEffect
+        val installedVersionCode = try {
+            val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            @Suppress("DEPRECATION")
+            if (android.os.Build.VERSION.SDK_INT >= 28) pInfo.longVersionCode.toInt() else pInfo.versionCode
+        } catch (e: Exception) {
+            Int.MAX_VALUE // can't determine our own version — never nag
+        }
+        if (info.latestVersionCode > installedVersionCode) {
+            pendingUpdate = info
         }
     }
 
@@ -312,6 +341,15 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // check below, which uses this to make a second tap on an already-
     // looping LOOP-mode pad stop it instead.
     val loopModeActive = remember { mutableStateMapOf<Int, Boolean>() }
+
+    // BPM pitch-preserving time-stretch (revived 2026-09-15, client override —
+    // see app/CLAUDE.md's BPM history): tracks, per NATIVE slot, the
+    // (sampleIdentity, ratio) pair last pushed to DrumEngine.setLoopStretch,
+    // so fire() only pays for a real WSOLA pass when either the ratio
+    // actually changed (BPM/SPEED moved) or the slot's own sample changed
+    // (kit switch/reassignment) — never on every retrigger of an already-
+    // stable loop or hit.
+    val lastStretchKey = remember { mutableStateMapOf<Int, Pair<String, Float>>() }
 
 // ── NEW: Recording jis pad pe start hui thi, usi ko lock karke rakhta he ──
     var recordingPad by remember { mutableStateOf(-1) }
@@ -921,36 +959,41 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             NativeBridge.setDelayChokePad(delayChokePad)
         }
 
-        // BPM redefined as pure RETRIGGER RATE, WSOLA time-stretch removed
-        // entirely (client override, 2026-09-12, final pass — supersedes
-        // both same-day BPM entries above): client sent the textbook
-        // definition of BPM — "60 BPM = 1 second mein 1 beat, 120 BPM = 1
-        // second mein 2 beats... BPM badhao to beat/loop tez hoga, ghatao to
-        // dheema" — i.e. BPM controls how OFTEN a looping pad retriggers,
-        // full stop. It says nothing about changing the sample's own
-        // playback speed/pitch, which is exactly what every WSOLA-stretch
-        // iteration today kept doing (and kept causing "quality kharab ho
-        // jaati hai, bahut fast baj raha hai" complaints, however tightly
-        // the ratio was clamped) — the sample itself was always being sped
-        // up or compressed to fit the beat. Removing the stretch mechanism
-        // entirely is the only way to guarantee the sample's own audio is
-        // NEVER altered by BPM: the sample always plays at its own normal
-        // recorded speed; BPM only changes the gap between repeats.
-        // loopBeatIntervalMs() is the new pure-retrigger-rate helper —
-        // `null` here means "not looping," matching every other call site's
-        // existing null-check.
-        fun loopBeatIntervalMs(): Long? {
-            if (!effectiveLoop()) return null
-            return (60_000f / bpm.coerceIn(40, 300) / speed.coerceIn(0.9f, 1.1f)).toLong().coerceAtLeast(50L)
+        // BPM restored as a real pitch-preserving time-stretch (client
+        // override, 2026-09-15 — supersedes the "pure retrigger rate" note
+        // below, kept for history): client sent worked examples — 120 BPM
+        // is the normal/baseline speed, 40 BPM plays noticeably slower, 300
+        // BPM noticeably faster, pitch must stay the same ("pitch same
+        // rahe — time-stretch") — and confirmed this must apply to EVERY
+        // hit, looping or one-shot, not just Loop mode.
+        //
+        // The native WSOLA engine (AudioEngine.cpp's wsolaStretch/
+        // setPadLoopStretch/Voice::useStretchedBuffer) was never actually
+        // removed by the 2026-09-12 pass below — only the Kotlin call sites
+        // were stripped. What made that WSOLA attempt sound bad wasn't the
+        // technique, it was the ratio formula: `beatIntervalMs /
+        // durationToShow` forced every sample to fit exactly one beat,
+        // which could wildly over/under-shoot depending on a sample's own
+        // length vs. the beat. This ratio instead anchors purely to BPM's
+        // distance from a fixed reference tempo (120, the existing
+        // default) — independent of any individual sample's length, so it
+        // can't reproduce that bug class.
+        fun stretchRatio(): Float {
+            val bpmClamped = bpm.coerceIn(40, 300)
+            val speedClamped = speed.coerceIn(0.9f, 1.1f)
+            return (REFERENCE_BPM / (bpmClamped * speedClamped)).coerceIn(0.3f, 3.2f)
         }
 
         // Fires the actual native trigger + updates the LCD/choke bookkeeping
         // for one hit. Used both for the immediate first hit (below) and for
         // each subsequent loop re-trigger inside the coroutine.
         fun fire(token: Long) {
+            val ratio = stretchRatio()
+            val stretchedDurationMs = (durationToShow * ratio).toLong().coerceAtLeast(30L)
+
             latestHitToken     = token
             playingPadUri      = uriToShow
-            playbackDurationMs = durationToShow
+            playbackDurationMs = stretchedDurationMs
             playbackPositionMs = 0L
 
             bankSlots.forEach { slot ->
@@ -959,11 +1002,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     else       -> currentKit
                 }
                 if (kitForSlot in kits.indices) {
-                    // WSOLA loop-stretch removed entirely (2026-09-12, final
-                    // pass) — BPM no longer alters the sample's own audio in
-                    // any way (see loopBeatIntervalMs()'s comment); every hit,
-                    // looping or not, just plays the raw buffer at its own
-                    // pitch/rate. useLoopStretch is always false now.
+                    // BPM pitch-preserving time-stretch, revived (see
+                    // stretchRatio()'s comment for the full history/why).
+                    // Only actually push a WSOLA pass to native when this
+                    // slot's (sample identity, ratio) pair changed since
+                    // the last push — a stable loop/repeated hit at an
+                    // unchanged BPM/kit skips it entirely.
+                    val sampleIdentity = AudioRepository.audioForPad(kitForSlot, index)?.uri?.toString()
+                        ?: "factory:${kits[kitForSlot].sounds.getOrElse(index) { -1 }}"
+                    val cacheKey = sampleIdentity to ratio
+                    if (lastStretchKey[slot] != cacheKey) {
+                        DrumEngine.setLoopStretch(slot, ratio)
+                        lastStretchKey[slot] = cacheKey
+                    }
                     DrumEngine.trigger(
                         slot,
                         kits[kitForSlot].volumes[index] * effectiveVelocity,
@@ -973,7 +1024,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         pan = kits[kitForSlot].padPan.getOrElse(index) { 0f },
                         gain = kits[kitForSlot].padGain.getOrElse(index) { 1f },
                         startFraction = kits[kitForSlot].padCropStartPct.getOrElse(index) { 0f },
-                        useLoopStretch = false
+                        useLoopStretch = true
                     )
                 }
             }
@@ -994,24 +1045,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 var keepGoing = true
 
                 while (keepGoing) {
-                    // Loop tempo, pure retrigger-rate BPM (client override,
-                    // 2026-09-12, final pass — see loopBeatIntervalMs()'s
-                    // comment near fire() for the full "why"): BPM only
-                    // controls how often the pad retriggers, never the
-                    // sample's own playback speed. The `maxOf(beatIntervalMs,
-                    // durationToShow)` floor means a high BPM can never cut a
-                    // sample short or speed it up — retrigger happens the
-                    // instant the sample naturally finishes, capped at "as
-                    // fast as the sample's own length allows." A low BPM
-                    // simply adds a silent gap before the next repeat, which
-                    // is the correct, literal "BPM ghatao to loop dheema"
-                    // behavior. SPEED remains a separate fine-tune multiplier
-                    // (0.9x-1.1x) folded into the same beat-interval formula;
-                    // it does NOT touch pitch — that's the PITCH knob's job.
-                    val beatIntervalMs = loopBeatIntervalMs()
-                    val waitWindowMs = if (beatIntervalMs != null) {
-                        maxOf(beatIntervalMs, durationToShow)
-                    } else durationToShow
+                    // BPM pitch-preserving time-stretch (client override,
+                    // 2026-09-15 — see stretchRatio()'s comment near fire()
+                    // for the full history/why): the sample's own duration
+                    // now genuinely tracks BPM, so "retrigger the instant
+                    // playback ends" is automatically gapless at any BPM
+                    // 40-300 — no separate silence-gap floor is needed for
+                    // Loop mode anymore, and this same target applies to a
+                    // one-shot hit too (BPM affects every hit, not just
+                    // looping pads, per client confirmation).
+                    val stretchedDurationMs = (durationToShow * stretchRatio()).toLong().coerceAtLeast(30L)
 
                     val startTime = System.currentTimeMillis()
                     var elapsed = 0L
@@ -1020,24 +1063,15 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         // by another pad's hit — the audio is already stopped
                         // synchronously wherever that happened, so there's no
                         // reason for this stale coroutine to keep waiting out
-                        // the rest of waitWindowMs before noticing.
+                        // the rest of the wait window before noticing.
                         if (loopTokens[index] != myLoopToken) break
 
                         elapsed = System.currentTimeMillis() - startTime
-                        // Recomputed live every tick, not just once before this
-                        // loop started — if the global Loop toggle (or per-pad
-                        // LOOP hold) gets turned off mid-wait, an ONESHOT pad
-                        // sitting in the extra tempo-sync padding beyond its own
-                        // sample length (waitWindowMs > durationToShow) should
-                        // finish out its own natural length and stop, not keep
-                        // lingering for the rest of a — possibly multi-second at
-                        // a slow BPM — beat interval before the toggle actually
-                        // takes effect.
-                        val target = if (effectiveLoop()) waitWindowMs else durationToShow
+                        val target = stretchedDurationMs
                         if (elapsed >= target) break
 
                         if (latestHitToken == myToken) {
-                            playbackPositionMs = elapsed.coerceAtMost(durationToShow)
+                            playbackPositionMs = elapsed.coerceAtMost(stretchedDurationMs)
                         }
                         // Adaptive poll: coarse (40ms) while there's still real
                         // time left on the wait, tight (12ms) only in the final
@@ -1050,7 +1084,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     }
 
                     if (latestHitToken == myToken) {
-                        playbackPositionMs = elapsed.coerceAtMost(durationToShow)
+                        playbackPositionMs = elapsed.coerceAtMost(stretchedDurationMs)
                     }
 
                     // ✅ NEW: agla loop chalega ya nahi — Loop toggle ON he
@@ -1060,7 +1094,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     if (keepGoing) {
                         // Timer-driven re-trigger (not touch-driven), so firing it
                         // from inside the coroutine is fine — it's tempo-locked
-                        // via waitWindowMs above regardless of dispatch timing.
+                        // via stretchedDurationMs above regardless of dispatch timing.
                         myToken = System.nanoTime()
                         fire(myToken)
                     } else {
@@ -3025,4 +3059,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             showPadMenu = false
         }
     )
+
+    pendingUpdate?.let { info ->
+        com.example.myapplication.update.UpdateDialog(
+            info = info,
+            onDismiss = { pendingUpdate = null }
+        )
+    }
 }

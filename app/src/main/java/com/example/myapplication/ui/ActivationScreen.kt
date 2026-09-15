@@ -125,7 +125,7 @@ fun ActivationScreen(onActivated: () -> Unit) {
                 !result.ok -> errorMsg = "Activation failed. Try again."
                 !result.active -> errorMsg = "This code has been deactivated. Contact support."
                 else -> {
-                    LicenseRepository.saveActivation(context, code.trim(), active = true, midiPurchased = result.midiPurchased)
+                    LicenseRepository.saveActivation(context, code.trim(), active = true, midiPurchased = result.midiPurchased, exp = result.exp, sig = result.sig)
                     onActivated()
                 }
             }

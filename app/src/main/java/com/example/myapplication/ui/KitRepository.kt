@@ -35,7 +35,10 @@ object KitRepository {
         val padPan:  List<Float> = List(8) { 0f },
         val padGain: List<Float> = List(8) { 1f },
         // NEW: delay on/off per pad per kit, not a single global toggle
-        val padDelayEnabled: List<Boolean> = List(8) { false }
+        val padDelayEnabled: List<Boolean> = List(8) { false },
+        // NEW: LOOP's BPM/SPEED are per-kit now, not one shared global value
+        val bpm: Int = 120,
+        val speed: Float = 1f
     )
 
     private const val PREFS_NAME = "kit_repository_prefs"
@@ -96,6 +99,8 @@ object KitRepository {
         putFloatArray("padPan",  entry.padPan)
         putFloatArray("padGain", entry.padGain)
         putBoolArray ("padDelayEnabled", entry.padDelayEnabled)
+        obj.put("bpm", entry.bpm)
+        obj.put("speed", entry.speed.toDouble())
 
         return obj
     }
@@ -167,7 +172,9 @@ object KitRepository {
             padPlayMode = loadStringArray("padPlayMode", "ONESHOT"),
             padPan  = loadFloatArray("padPan",  0f),
             padGain = loadFloatArray("padGain", 1f),
-            padDelayEnabled = loadBoolArray("padDelayEnabled", false)
+            padDelayEnabled = loadBoolArray("padDelayEnabled", false),
+            bpm = obj.optInt("bpm", 120),
+            speed = obj.optDouble("speed", 1.0).toFloat()
         )
     }
 

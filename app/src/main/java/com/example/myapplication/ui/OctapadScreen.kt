@@ -103,7 +103,14 @@ data class Kit(
         MutableList(8) { -1 },
     val factoryKitNumber: Int = -1,
     val chokeGroups: List<SnapshotStateList<Int>> = List(8) { mutableStateListOf() },
-    val activeChokeLevelState: MutableState<Int> = mutableStateOf(0)
+    val activeChokeLevelState: MutableState<Int> = mutableStateOf(0),
+    // NEW: LOOP's BPM/SPEED are per-kit now (client request, 2026-09-16 —
+    // "jis kit me loop bpm speed use kre usi me bs rahe, kit change karne
+    // par dusre kit me vo kaam nahi karna chahiye"). Each kit remembers its
+    // own BPM/SPEED instead of sharing one global value, so switching kits
+    // never carries one kit's tempo setting into another.
+    val bpmState: MutableState<Int> = mutableStateOf(120),
+    val speedState: MutableState<Float> = mutableStateOf(1f)
 )
 
 // NEW: MIDI CC -> target mappings (Volume/Pitch/EQ/Patch/Edit/Save) are now
@@ -118,7 +125,7 @@ const val DEFAULT_PAD_DURATION_MS = 500L
 
 // BPM pitch-preserving time-stretch reference tempo — 120 BPM is "normal"
 // (stretch ratio 1.0, sample plays at its own recorded speed); matches
-// PreferencesRepository's existing default BPM. See stretchRatio() in
+// PreferencesRepository's existing default BPM. See stretchRatioForKit() in
 // onPadHit() for the full formula/history.
 const val REFERENCE_BPM = 120f
 
@@ -297,7 +304,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         mutableStateListOf(false, false, false, false, false, false, false, false)
     }
 
-    var bpm by remember { mutableStateOf(PreferencesRepository.loadBpm()) }
+    // BPM is per-kit now (see Kit.bpmState / bpmForCurrentKit() below) — no
+    // longer a single shared global var. A kit saved before this migration
+    // has no "bpm" key in its JSON and falls back to 120 (KitRepository's
+    // fromJson default) — PreferencesRepository.loadBpm/saveBpm are kept,
+    // unread by any UI, so old backups still parse (same pattern as the
+    // dead loadSpeed/saveSpeed calls below).
 
     // NEW: Delay effect state. delayEnabled itself is per-pad-per-kit now
     // (kits[currentKit].padDelayEnabled) — see curPadDelayEnabled below —
@@ -314,11 +326,10 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
     // PreferencesRepository field (loadDelayEnabled/saveDelayEnabled) that
     // was already there but unused since delay became per-pad-per-kit.
     var delayMasterEnabled by remember { mutableStateOf(PreferencesRepository.loadDelayEnabled()) }
-    // NEW: LOOP group's SPEED control — global tempo-synced playback-rate
-    // multiplier (0.5x..2x), separate from BPM.
-    // SPEED is a fine-tune multiplier around BPM now (0.9x–1.1x) — clamp any
-    // value persisted under the old wider 0.5x–2x range so it lands in-panel.
-    var speed by remember { mutableStateOf(PreferencesRepository.loadSpeed().coerceIn(0.9f, 1.1f)) }
+    // SPEED is per-kit now too (see Kit.speedState / speedForCurrentKit()
+    // below) — a fine-tune multiplier around BPM (0.9x-1.1x), no longer a
+    // shared global var. PreferencesRepository.loadSpeed/saveSpeed are kept,
+    // unread by any UI, so old backups still parse.
     // delayLevel (decay factor) is fixed at 0.5 — controlled by EQ panel's DLY TIME knob per pad
 
     // EQ state is now stored per-pad inside Kit.padLevels / padEqLow / padEqMid / padEqHigh / padDelayMs
@@ -405,7 +416,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                         chokeGroups = entry.chokeGroups.map { levels ->
                             mutableStateListOf<Int>().apply { addAll(levels) }
                         },
-                        activeChokeLevelState = mutableStateOf(entry.activeChokeLevel)
+                        activeChokeLevelState = mutableStateOf(entry.activeChokeLevel),
+                        bpmState = mutableStateOf(entry.bpm.coerceIn(40, 300)),
+                        speedState = mutableStateOf(entry.speed.coerceIn(0.9f, 1.1f))
                     )
                 )
             }
@@ -595,7 +608,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                     padPlayMode = it.padPlayMode.toList(),
                     padPan  = it.padPan.toList(),
                     padGain = it.padGain.toList(),
-                    padDelayEnabled = it.padDelayEnabled.toList()
+                    padDelayEnabled = it.padDelayEnabled.toList(),
+                    bpm = it.bpmState.value,
+                    speed = it.speedState.value
                 )
             }
         )
@@ -628,6 +643,29 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
     LaunchedEffect(currentKit) {
         KitRepository.saveLastSelectedKit(currentKit)
+    }
+
+    // NEW: BPM/SPEED are per-kit now (client request, 2026-09-16 — "kit
+    // change karne par dusre kit me loop bpm speed kaam nahi karna chahiye").
+    // Each Kit holds its own bpmState/speedState; these helpers read/write
+    // whichever kit is actually active, same bankKitIdx()-live pattern as
+    // loopOnForCurrentKit() above — never capture bankKitIdx() into a val,
+    // for the same staleness reasons documented on bankKitIdx() itself.
+    fun bpmForCurrentKit(): Int =
+        if (bankKitIdx() in kits.indices) kits[bankKitIdx()].bpmState.value else 120
+    fun setBpmForCurrentKit(v: Int) {
+        if (bankKitIdx() in kits.indices) {
+            kits[bankKitIdx()].bpmState.value = v.coerceIn(40, 300)
+            persistKitsDebounced()
+        }
+    }
+    fun speedForCurrentKit(): Float =
+        if (bankKitIdx() in kits.indices) kits[bankKitIdx()].speedState.value else 1f
+    fun setSpeedForCurrentKit(v: Float) {
+        if (bankKitIdx() in kits.indices) {
+            kits[bankKitIdx()].speedState.value = v.coerceIn(0.9f, 1.1f)
+            persistKitsDebounced()
+        }
     }
 
     // Shared by the EDIT (crop) screen's Clear button and the FX panel's
@@ -959,13 +997,17 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             NativeBridge.setDelayChokePad(delayChokePad)
         }
 
-        // BPM restored as a real pitch-preserving time-stretch (client
-        // override, 2026-09-15 — supersedes the "pure retrigger rate" note
-        // below, kept for history): client sent worked examples — 120 BPM
-        // is the normal/baseline speed, 40 BPM plays noticeably slower, 300
-        // BPM noticeably faster, pitch must stay the same ("pitch same
-        // rahe — time-stretch") — and confirmed this must apply to EVERY
-        // hit, looping or one-shot, not just Loop mode.
+        // BPM/SPEED time-stretch (client override, 2026-09-16 — "speed aur
+        // bpm sirf loop mode me kaam karega, baki sabhi ka same rahega sirf
+        // loop mode me"): supersedes the 2026-09-15 "applies to every hit"
+        // rule directly below (kept for history) — BPM/SPEED must now do
+        // NOTHING unless the pad's own kit has its LOOP toggle on; a one-shot
+        // or multiplay hit on a non-looping kit plays at its raw recorded
+        // speed, exactly like before BPM/SPEED existed. BPM/SPEED are also
+        // per-kit now (`Kit.bpmState`/`speedState`, see the Kit data class) —
+        // this function takes the specific kit to compute the ratio for
+        // rather than reading one shared global, so a value tuned on one kit
+        // never bleeds into another kit's hits.
         //
         // The native WSOLA engine (AudioEngine.cpp's wsolaStretch/
         // setPadLoopStretch/Voice::useStretchedBuffer) was never actually
@@ -978,9 +1020,12 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // distance from a fixed reference tempo (120, the existing
         // default) — independent of any individual sample's length, so it
         // can't reproduce that bug class.
-        fun stretchRatio(): Float {
-            val bpmClamped = bpm.coerceIn(40, 300)
-            val speedClamped = speed.coerceIn(0.9f, 1.1f)
+        fun stretchRatioForKit(kitIdx: Int): Float {
+            if (kitIdx !in kits.indices) return 1f
+            // Gate: only kits with LOOP on are affected by BPM/SPEED at all.
+            if (kitIdx !in loopEnabledKits) return 1f
+            val bpmClamped = kits[kitIdx].bpmState.value.coerceIn(40, 300)
+            val speedClamped = kits[kitIdx].speedState.value.coerceIn(0.9f, 1.1f)
             return (REFERENCE_BPM / (bpmClamped * speedClamped)).coerceIn(0.3f, 3.2f)
         }
 
@@ -988,7 +1033,7 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         // for one hit. Used both for the immediate first hit (below) and for
         // each subsequent loop re-trigger inside the coroutine.
         fun fire(token: Long) {
-            val ratio = stretchRatio()
+            val ratio = stretchRatioForKit(bankKitIdx())
             val stretchedDurationMs = (durationToShow * ratio).toLong().coerceAtLeast(30L)
 
             latestHitToken     = token
@@ -1003,16 +1048,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 }
                 if (kitForSlot in kits.indices) {
                     // BPM pitch-preserving time-stretch, revived (see
-                    // stretchRatio()'s comment for the full history/why).
-                    // Only actually push a WSOLA pass to native when this
-                    // slot's (sample identity, ratio) pair changed since
+                    // stretchRatioForKit()'s comment for the full history/
+                    // why). Only actually push a WSOLA pass to native when
+                    // this slot's (sample identity, ratio) pair changed since
                     // the last push — a stable loop/repeated hit at an
-                    // unchanged BPM/kit skips it entirely.
+                    // unchanged BPM/kit skips it entirely. Computed per-slot
+                    // from that slot's OWN kit (A and B can be on different
+                    // kits with different BPM/SPEED/loop-on state).
+                    val slotRatio = stretchRatioForKit(kitForSlot)
                     val sampleIdentity = AudioRepository.audioForPad(kitForSlot, index)?.uri?.toString()
                         ?: "factory:${kits[kitForSlot].sounds.getOrElse(index) { -1 }}"
-                    val cacheKey = sampleIdentity to ratio
+                    val cacheKey = sampleIdentity to slotRatio
                     if (lastStretchKey[slot] != cacheKey) {
-                        DrumEngine.setLoopStretch(slot, ratio)
+                        DrumEngine.setLoopStretch(slot, slotRatio)
                         lastStretchKey[slot] = cacheKey
                     }
                     DrumEngine.trigger(
@@ -1046,15 +1094,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
                 while (keepGoing) {
                     // BPM pitch-preserving time-stretch (client override,
-                    // 2026-09-15 — see stretchRatio()'s comment near fire()
-                    // for the full history/why): the sample's own duration
-                    // now genuinely tracks BPM, so "retrigger the instant
+                    // 2026-09-15 — see stretchRatioForKit()'s comment near
+                    // fire() for the full history/why): the sample's own
+                    // duration now genuinely tracks BPM, so "retrigger the instant
                     // playback ends" is automatically gapless at any BPM
-                    // 40-300 — no separate silence-gap floor is needed for
-                    // Loop mode anymore, and this same target applies to a
-                    // one-shot hit too (BPM affects every hit, not just
-                    // looping pads, per client confirmation).
-                    val stretchedDurationMs = (durationToShow * stretchRatio()).toLong().coerceAtLeast(30L)
+                    // 40-300 whenever LOOP is on for this kit — no separate
+                    // silence-gap floor is needed. (2026-09-16 override: this
+                    // no longer applies to a one-shot hit on a non-looping
+                    // kit — stretchRatioForKit() returns 1f there.) Read
+                    // bankKitIdx() live on every iteration, never captured.
+                    val stretchedDurationMs = (durationToShow * stretchRatioForKit(bankKitIdx())).toLong().coerceAtLeast(30L)
 
                     val startTime = System.currentTimeMillis()
                     var elapsed = 0L
@@ -1268,15 +1317,11 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         nativeSlotsFor(selectedPad).forEach { DrumEngine.setGain(it, curPadGain) }
     }
 
-    // NEW: Persist BPM whenever it changes
-    LaunchedEffect(bpm) {
-        PreferencesRepository.saveBpm(bpm)
-    }
+    // BPM/SPEED persistence: handled by setBpmForCurrentKit()/
+    // setSpeedForCurrentKit() (via persistKitsDebounced()), since both are
+    // per-kit fields on Kit now, not global prefs.
     LaunchedEffect(delayLevel) {
         PreferencesRepository.saveDelayLevel(delayLevel)
-    }
-    LaunchedEffect(speed) {
-        PreferencesRepository.saveSpeed(speed)
     }
 
     // NEW: Persist remaining app state so re-opening the app resumes exactly
@@ -1430,6 +1475,19 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 cc.getCc("EQ_HIGH") -> {
                     kits[bankKitIdx()].padEqHigh[selectedPad] = normalized * 2f
                     NativeBridge.setEqBands(kits[bankKitIdx()].padEqLow[selectedPad], kits[bankKitIdx()].padEqMid[selectedPad], kits[bankKitIdx()].padEqHigh[selectedPad])
+                    persistKitsDebounced()
+                }
+
+                // NEW (2026-09-16, client request — paid extra knob): DLY
+                // TIME (50ms-1000ms, same range as DelayPanel's on-screen
+                // slider) mapped to a MIDI CC, same continuous-knob pattern
+                // as VOLUME/PITCH/EQ above. Writing padDelayMs here is
+                // enough to reach native — the sync LaunchedEffect further
+                // down (keyed on curPadDelayMs) re-reads it live and pushes
+                // NativeBridge.setDelayTapIntervalFrames() automatically, no
+                // separate native push needed here.
+                cc.getCc("DLY_TIME") -> {
+                    kits[bankKitIdx()].padDelayMs[selectedPad] = (50 + normalized * 950f).toInt().coerceIn(50, 1000)
                     persistKitsDebounced()
                 }
 
@@ -1664,7 +1722,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             sounds = mutableStateListOf<Int>().apply { addAll(source.sounds) },
             factoryKitNumber = source.factoryKitNumber,
             chokeGroups = source.chokeGroups.map { levels -> mutableStateListOf<Int>().apply { addAll(levels) } },
-            activeChokeLevelState = mutableStateOf(source.activeChokeLevelState.value)
+            activeChokeLevelState = mutableStateOf(source.activeChokeLevelState.value),
+            bpmState = mutableStateOf(source.bpmState.value),
+            speedState = mutableStateOf(source.speedState.value)
         )
 
         // BUG FIX: this used to `kits.add(newKit)`, which lands past whichever
@@ -2211,8 +2271,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             RightPanel(
 
                 controlPanelWidth = controlPanelWidth,
-                bpm = bpm,
-                onBpmChange = { bpm = it },
+                bpm = bpmForCurrentKit(),
+                onBpmChange = { setBpmForCurrentKit(it) },
                 loopEnabled = loopOnForCurrentKit(),
                 onLoopChange = {
                     setLoopForCurrentKit(it)
@@ -2244,8 +2304,8 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                 onDelayLevelChange = { delayLevel = it },
                 delayMasterEnabled = delayMasterEnabled,
                 onDelayMasterEnabledChange = { delayMasterEnabled = it },
-                speed = speed,
-                onSpeedChange = { speed = it },
+                speed = speedForCurrentKit(),
+                onSpeedChange = { setSpeedForCurrentKit(it) },
                 masterLevel = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padLevels[selectedPad] else 1f,
                 eqLow  = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqLow[selectedPad]  else 1f,
                 eqMid  = if (bankKitIdx() in kits.indices) kits[bankKitIdx()].padEqMid[selectedPad]  else 1f,
@@ -2773,7 +2833,9 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
                             sounds = sounds,
                             factoryKitNumber = entry.factoryKitNumber,
                             chokeGroups = entry.chokeGroups.map { levels -> mutableStateListOf<Int>().apply { addAll(levels) } },
-                            activeChokeLevelState = mutableStateOf(entry.activeChokeLevel)
+                            activeChokeLevelState = mutableStateOf(entry.activeChokeLevel),
+                            bpmState = mutableStateOf(entry.bpm.coerceIn(40, 300)),
+                            speedState = mutableStateOf(entry.speed.coerceIn(0.9f, 1.1f))
                         )
                         val newKitIndex = targetSlotForLoad()
                         if (newKitIndex == null) {

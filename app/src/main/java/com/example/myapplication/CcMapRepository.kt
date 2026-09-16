@@ -6,8 +6,16 @@ import org.json.JSONObject
 /**
  * Persists MIDI CC (Control Change) -> named-target mappings, so a hardware
  * knob/slider can be "learned" for any of: VOLUME, PITCH, EQ_LOW, EQ_MID,
- * EQ_HIGH — continuous controls, where only a CC's 0-127 value stream can
- * drive the knob's position.
+ * EQ_HIGH, DLY_TIME — continuous controls, where only a CC's 0-127 value
+ * stream can drive the knob's position.
+ *
+ * DLY_TIME (added 2026-09-16, client request — "paid me ek extra knob hai,
+ * delay time map MIDI CC/note controller"): drives the selected pad's own
+ * DLY TIME knob (50ms-1000ms), same per-pad-per-kit value the on-screen
+ * DelayPanel slider edits. It's a genuinely continuous knob like Volume/
+ * Pitch/EQ, so it belongs here (CC-learned), not in NoteMapRepository —
+ * see that file's own doc comment for why button/action targets moved there
+ * instead.
  *
  * BUG FIX / CHANGE: PATCH_NEXT, PATCH_PREV, EDIT, SAVE, DELAY_TOGGLE,
  * BANK_A, BANK_B, BANK_AB, and PAD_1..PAD_8 used to live here too, learned
@@ -22,7 +30,7 @@ import org.json.JSONObject
  */
 object CcMapRepository {
 
-    val TARGETS = listOf("VOLUME", "PITCH", "EQ_LOW", "EQ_MID", "EQ_HIGH")
+    val TARGETS = listOf("VOLUME", "PITCH", "EQ_LOW", "EQ_MID", "EQ_HIGH", "DLY_TIME")
 
     // Preserves the app's original fixed CC numbers as defaults so existing
     // hardware setups keep working without re-learning.

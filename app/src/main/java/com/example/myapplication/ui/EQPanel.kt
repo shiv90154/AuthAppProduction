@@ -67,6 +67,15 @@ fun EQPanel(
     onPanChange: (Float) -> Unit = {},
     padGain: Float = 1f,
     onGainChange: (Float) -> Unit = {},
+    // REVERB: 0 = off, 1 = ROOM 1, 2 = ROOM 2, 3 = HALL. SINGLE scope edits
+    // only the selected pad; ALL scope applies the choice (and DECAY) to every
+    // pad of the kit at once.
+    reverbType: Int = 0,
+    onReverbTypeChange: (Int) -> Unit = {},
+    reverbDecay: Float = 0.5f,
+    onReverbDecayChange: (Float) -> Unit = {},
+    reverbScopeAll: Boolean = true,
+    onReverbScopeChange: (Boolean) -> Unit = {},
     // DELAY moved out to its own dedicated DelayPanel.kt (a top-level DELAY
     // button next to CROP/CHOKE) — no longer part of FX.
     // NEW: one-tap file-manager import straight onto this pad — skips the
@@ -256,6 +265,46 @@ fun EQPanel(
 
                 EqDividerLine()
 
+                // ── REVERB ────────────────────────────────────────────────────
+                SectionLabel("REVERB")
+
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ReverbChip("SINGLE PAD", !reverbScopeAll, Modifier.weight(1f)) { onReverbScopeChange(false) }
+                    ReverbChip("ALL PADS", reverbScopeAll, Modifier.weight(1f)) { onReverbScopeChange(true) }
+                }
+                Text(
+                    if (reverbScopeAll) "Applies to all 8 pads of this patch"
+                    else "Applies to PAD ${selectedPad + 1} only",
+                    color = EqTextMuted, fontSize = 8.sp
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ReverbChip("OFF", reverbType == 0, Modifier.weight(1f)) { onReverbTypeChange(0) }
+                    ReverbChip("ROOM 1", reverbType == 1, Modifier.weight(1f)) { onReverbTypeChange(1) }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ReverbChip("ROOM 2", reverbType == 2, Modifier.weight(1f)) { onReverbTypeChange(2) }
+                    ReverbChip("HALL", reverbType == 3, Modifier.weight(1f)) { onReverbTypeChange(3) }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    EqKnobColumn(
+                        label = "DECAY",
+                        value = reverbDecay,
+                        min = 0f, max = 1f,
+                        color = EqOrange,
+                        displayText = "${(reverbDecay * 100).toInt()}%",
+                        onValueChange = onReverbDecayChange
+                    )
+                }
+                Text(
+                    "DECAY = how long the echo/ring of the room lasts. Applies on the next hit.",
+                    color = EqTextMuted, fontSize = 8.sp
+                )
+
+                EqDividerLine()
+
                 // ── PAD BEHAVIOUR ─────────────────────────────────────────────
                 SectionLabel("PAD BEHAVIOUR")
 
@@ -388,6 +437,21 @@ private fun PillToggle(enabled: Boolean, activeColor: Color) {
                 .clip(RoundedCornerShape(50))
                 .background(if (enabled) activeColor else Color(0xFF555555))
         )
+    }
+}
+
+@Composable
+private fun ReverbChip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(28.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (selected) EqOrange else Color(0xFF2A2A2A))
+            .clickable(remember { MutableInteractionSource() }, null) { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = if (selected) Color.Black else EqTextMuted,
+             fontSize = 8.sp, fontWeight = FontWeight.Bold)
     }
 }
 

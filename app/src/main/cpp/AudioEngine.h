@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include "Reverb.h"
 
 // 24 native pad slots: 0-7 = Bank A's active kit, 8-15 = Bank B's,
 // 16-23 = Bank C's — lets all three kit banks stay loaded simultaneously
@@ -79,6 +80,10 @@ struct Voice {
     // raw recorded length, without changing its pitch. Same write-then-
     // `ready` discipline as every other Voice field above.
     std::atomic<bool>  useStretchedBuffer{false};
+    // 0 = dry, 1..3 = ROOM 1 / ROOM 2 / HALL — which reverb bus this voice
+    // feeds (see AudioEngine::reverbs_). Written before `ready` like every
+    // other Voice field.
+    std::atomic<int>   reverbType{0};
 };
 
 struct DelayTap {
@@ -112,6 +117,11 @@ public:
     // correlation search) — call from Kotlin only when the ratio actually
     // changes, never on every audio-thread callback.
     void setPadLoopStretch(int padIndex, float ratio);
+    void releaseStretchedVoices(int padIndex);
+    // Reverb (per pad). type: 0 = off, 1 = ROOM 1, 2 = ROOM 2, 3 = HALL.
+    // decay: 0..1 — how long the tail rings. Read by triggerPad() at hit
+    // time, so changing it never affects a voice that is already sounding.
+    void setPadReverb(int padIndex, int type, float decay);
     void setPadVolume(int padIndex, float volume);
     void setPadPitch(int padIndex, float pitch);
     void setPadPan(int padIndex, float pan);
@@ -199,4 +209,16 @@ private:
     float bp1State_[2] = {0,0};   // intermediate state for mid
 
     void fireDelayTaps(int32_t numFrames);
+
+    // Reverb: one bus per room type. Voices with reverbType = k+1 are summed
+    // into reverbSend_[k]; the bus output is added to the mix before the
+    // limiter. The tail keeps ringing after the voice ends, until
+    // reverbTailFrames_[k] runs out (then the bus is cleared and skipped).
+    static constexpr int kNumReverbTypes = 3;
+    Reverb                             reverbs_[kNumReverbTypes];
+    std::vector<float>                 reverbSend_[kNumReverbTypes];
+    int64_t                            reverbTailFrames_[kNumReverbTypes] = {0, 0, 0};
+    std::atomic<float>                 reverbDecay_[kNumReverbTypes] {};
+    std::array<std::atomic<int>, kMaxPads>   padReverbType_{};
+    std::array<std::atomic<float>, kMaxPads> padReverbDecay_{};
 };

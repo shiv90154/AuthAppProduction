@@ -129,6 +129,14 @@ Java_com_example_myapplication_NativeBridge_triggerPad(
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_com_example_myapplication_NativeBridge_setPadReverb(
+        JNIEnv *env, jobject thiz, jint padIndex, jint type, jfloat decay)
+{
+    audioEngine.setPadReverb(padIndex, type, decay);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_com_example_myapplication_NativeBridge_setPadLoopStretch(
         JNIEnv *env, jobject thiz, jint padIndex, jfloat ratio)
 {

@@ -38,7 +38,14 @@ object KitRepository {
         val padDelayEnabled: List<Boolean> = List(8) { false },
         // NEW: LOOP's BPM/SPEED are per-kit now, not one shared global value
         val bpm: Int = 120,
-        val speed: Float = 1f
+        val speed: Float = 1f,
+        // Per-pad BPM/SPEED overrides for the SINGLE scope in the LOOP panel
+        // (0 = this pad follows the kit-wide value above).
+        val padBpm: List<Int> = List(8) { 0 },
+        val padSpeed: List<Float> = List(8) { 0f },
+        // Per-pad REVERB: type 0 = off, 1 = ROOM 1, 2 = ROOM 2, 3 = HALL; decay 0..1
+        val padReverbType: List<Int> = List(8) { 0 },
+        val padReverbDecay: List<Float> = List(8) { 0.5f }
     )
 
     private const val PREFS_NAME = "kit_repository_prefs"
@@ -99,6 +106,10 @@ object KitRepository {
         putFloatArray("padPan",  entry.padPan)
         putFloatArray("padGain", entry.padGain)
         putBoolArray ("padDelayEnabled", entry.padDelayEnabled)
+        putIntArray  ("padReverbType", entry.padReverbType)
+        putFloatArray("padReverbDecay", entry.padReverbDecay)
+        putIntArray  ("padBpm", entry.padBpm)
+        putFloatArray("padSpeed", entry.padSpeed)
         obj.put("bpm", entry.bpm)
         obj.put("speed", entry.speed.toDouble())
 
@@ -174,7 +185,11 @@ object KitRepository {
             padGain = loadFloatArray("padGain", 1f),
             padDelayEnabled = loadBoolArray("padDelayEnabled", false),
             bpm = obj.optInt("bpm", 120),
-            speed = obj.optDouble("speed", 1.0).toFloat()
+            speed = obj.optDouble("speed", 1.0).toFloat(),
+            padReverbType = loadIntArray("padReverbType", 0),
+            padReverbDecay = loadFloatArray("padReverbDecay", 0.5f),
+            padBpm = loadIntArray("padBpm", 0),
+            padSpeed = loadFloatArray("padSpeed", 0f)
         )
     }
 

@@ -147,6 +147,18 @@ bool AudioEngine::start() {
         stream_->setBufferSizeInFrames(framesPerBurst);
     }
 
+    // Reverb buses: sized from the actual stream rate, built before the
+    // callback can run (requestStart is below). ROOM 1 small/dark, ROOM 2
+    // medium, HALL large/bright-ish — only delay-line scale and damping
+    // differ, which is what reads as room size.
+    reverbs_[0].init(outputSampleRate_, 0.45f, 0.50f);
+    reverbs_[1].init(outputSampleRate_, 0.85f, 0.40f);
+    reverbs_[2].init(outputSampleRate_, 1.60f, 0.20f);
+    for (int k = 0; k < kNumReverbTypes; k++) {
+        reverbSend_[k].assign(static_cast<size_t>(4096) * 2, 0.0f);
+        reverbTailFrames_[k] = 0;
+    }
+
     result = stream_->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));
@@ -248,6 +260,26 @@ void AudioEngine::loadPadBuffer(int padIndex, const int16_t* pcm, int32_t numFra
     LOGD("Loaded pad %d: %d frames @ %dHz", padIndex, numFrames, sampleRate);
 }
 
+// Caller must hold bufferMutex_.
+void AudioEngine::releaseStretchedVoices(int padIndex) {
+    for (auto &v : voices_) {
+        if (v.ready.load(std::memory_order_acquire) && v.padIndex == padIndex &&
+            v.useStretchedBuffer.load(std::memory_order_relaxed)) {
+            v.releasing.store(true, std::memory_order_release);
+        }
+    }
+}
+
+void AudioEngine::setPadReverb(int padIndex, int type, float decay) {
+    if (padIndex < 0 || padIndex >= kMaxPads) return;
+    if (type < 0) type = 0;
+    if (type > kNumReverbTypes) type = kNumReverbTypes;
+    if (decay < 0.0f) decay = 0.0f;
+    if (decay > 1.0f) decay = 1.0f;
+    padReverbType_[padIndex].store(type, std::memory_order_relaxed);
+    padReverbDecay_[padIndex].store(decay, std::memory_order_relaxed);
+}
+
 void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
     if (padIndex < 0 || padIndex >= kMaxPads) return;
 
@@ -261,6 +293,7 @@ void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
         // drop any cached stretch so playback just uses the raw buffer
         // (also the path a pad takes when it stops looping at all).
         if (std::abs(ratio - 1.0f) < 0.01f) {
+            releaseStretchedVoices(padIndex);
             stretchedBuffers_[padIndex].loaded = false;
             return;
         }
@@ -290,6 +323,10 @@ void AudioEngine::setPadLoopStretch(int padIndex, float ratio) {
     // comparing it catches a reload that happened mid-computation even
     // though `loaded` alone can't tell the two states apart.
     if (!buffers_[padIndex].loaded || bufferGeneration_[padIndex] != generationBefore) return;
+    // A voice mid-way through the OLD stretched copy would suddenly read the
+    // new (different-length) one at the same position — an amplitude jump =
+    // click. Fade those voices out (~5ms) instead; new hits use the new copy.
+    releaseStretchedVoices(padIndex);
     stretchedBuffers_[padIndex].samples    = std::move(stretched);
     stretchedBuffers_[padIndex].channels   = channels;
     stretchedBuffers_[padIndex].sampleRate = sampleRate;
@@ -438,6 +475,13 @@ void AudioEngine::triggerPad(int padIndex, float volume, float pitch, bool stopE
                 v.lengthFraction.store(clampedLen, std::memory_order_relaxed);
                 v.pan.store(pan, std::memory_order_relaxed);
                 v.gain.store(gain, std::memory_order_relaxed);
+                int rType = padReverbType_[padIndex].load(std::memory_order_relaxed);
+                v.reverbType.store(rType, std::memory_order_relaxed);
+                if (rType > 0) {
+                    reverbDecay_[rType - 1].store(
+                            padReverbDecay_[padIndex].load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+                }
                 v.releaseGain = 1.0f;
                 v.attackGain = anotherVoiceActive ? 0.0f : 1.0f;
                 v.releasing.store(false, std::memory_order_release);
@@ -642,6 +686,7 @@ void AudioEngine::fireDelayTaps(int32_t numFrames) {
                         v.lengthFraction.store(1.0f, std::memory_order_relaxed);
                         v.pan.store(it->pan, std::memory_order_relaxed);
                         v.gain.store(it->gain, std::memory_order_relaxed);
+                        v.reverbType.store(0, std::memory_order_relaxed);
                         v.releaseGain = 1.0f;
                         v.attackGain = anotherVoiceActive ? 0.0f : 1.0f;
                         v.releasing.store(false, std::memory_order_release);
@@ -717,6 +762,16 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     const float releaseStep = 1.0f / (static_cast<float>(outputSampleRate_) * 0.005f);
     const float attackStep  = 1.0f / (static_cast<float>(outputSampleRate_) * 0.003f);
 
+    // Reverb send buses — zeroed every callback; only the ones a voice
+    // actually writes to get processed below.
+    bool reverbFed[kNumReverbTypes] = {false, false, false};
+    for (int k = 0; k < kNumReverbTypes; k++) {
+        if (reverbSend_[k].size() < static_cast<size_t>(numFrames) * 2) {
+            reverbSend_[k].resize(static_cast<size_t>(numFrames) * 2);
+        }
+        std::fill(reverbSend_[k].begin(), reverbSend_[k].begin() + numFrames * 2, 0.0f);
+    }
+
     {
         std::lock_guard<std::mutex> lock(bufferMutex_); // brief; loads are rare
 
@@ -769,6 +824,9 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
             // never entered for that case (no cost, no behavior change from
             // before any of this existed).
             bool isReleasing = v.releasing.load(std::memory_order_relaxed);
+            const int rType = v.reverbType.load(std::memory_order_relaxed);
+            float *revBus = (rType > 0 && rType <= kNumReverbTypes) ? reverbSend_[rType - 1].data() : nullptr;
+            if (revBus) reverbFed[rType - 1] = true;
 
             for (int32_t i = 0; i < numFrames; i++) {
                 int64_t idx = static_cast<int64_t>(v.position);
@@ -801,11 +859,34 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
                 float l = l0 + (l1 - l0) * frac;
                 float r = r0 + (r1 - r0) * frac;
 
-                out[i * 2]     += l * effVol * panL * frameGain;
-                out[i * 2 + 1] += r * effVol * panR * frameGain;
+                const float outL = l * effVol * panL * frameGain;
+                const float outR = r * effVol * panR * frameGain;
+                out[i * 2]     += outL;
+                out[i * 2 + 1] += outR;
+                if (revBus) {
+                    revBus[i * 2]     += outL;
+                    revBus[i * 2 + 1] += outR;
+                }
 
                 v.position += rate;
             }
+        }
+    }
+
+    // Reverb: run each bus that was fed this buffer, plus any whose tail is
+    // still ringing out. Decay 0..1 maps to comb feedback 0.70..0.97 (longer
+    // tail); once the tail window has fully elapsed the bus is cleared and
+    // skipped so an idle reverb costs nothing.
+    {
+        const int64_t tailWindow = static_cast<int64_t>(outputSampleRate_) * 9;
+        for (int k = 0; k < kNumReverbTypes; k++) {
+            if (reverbFed[k]) reverbTailFrames_[k] = tailWindow;
+            if (reverbTailFrames_[k] <= 0) continue;
+            float decay = reverbDecay_[k].load(std::memory_order_relaxed);
+            float feedback = 0.70f + 0.27f * decay;
+            reverbs_[k].process(reverbSend_[k].data(), out, numFrames, feedback, 0.8f);
+            reverbTailFrames_[k] -= numFrames;
+            if (reverbTailFrames_[k] <= 0) reverbs_[k].clear();
         }
     }
 

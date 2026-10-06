@@ -54,6 +54,10 @@ object NativeBridge {
      * never on every frame/tick. */
     external fun setPadLoopStretch(padIndex: Int, ratio: Float)
 
+    /** Per-pad reverb: type 0 = off, 1 = ROOM 1, 2 = ROOM 2, 3 = HALL; decay 0..1
+     * (tail length). Takes effect on the pad's NEXT hit. */
+    external fun setPadReverb(padIndex: Int, type: Int, decay: Float)
+
     external fun setPadVolumeNative(padIndex: Int, volume: Float)
     external fun setPadPitchNative(padIndex: Int, pitch: Float)
     external fun setPadPanNative(padIndex: Int, pan: Float)

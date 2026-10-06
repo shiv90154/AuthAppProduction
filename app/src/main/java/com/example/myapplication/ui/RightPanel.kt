@@ -117,6 +117,15 @@ fun RightPanel(
     onOpenImportPatch: () -> Unit = {},
     bpm: Int = 120,
     onBpmChange: (Int) -> Unit = {},
+    bpmScopeAll: Boolean = true,
+    onBpmScopeChange: (Boolean) -> Unit = {},
+    // REVERB (FX panel): per selected pad, with SINGLE/ALL scope.
+    reverbType: Int = 0,
+    onReverbTypeChange: (Int) -> Unit = {},
+    reverbDecay: Float = 0.5f,
+    onReverbDecayChange: (Float) -> Unit = {},
+    reverbScopeAll: Boolean = true,
+    onReverbScopeChange: (Boolean) -> Unit = {},
 
     // Delay — its own dedicated top-level panel (DelayPanel.kt), not part of FX
     delayEnabled: Boolean = false,
@@ -259,6 +268,12 @@ fun RightPanel(
                 onPanChange = onPanChange,
                 padGain = padGain,
                 onGainChange = onGainChange,
+                reverbType = reverbType,
+                onReverbTypeChange = onReverbTypeChange,
+                reverbDecay = reverbDecay,
+                onReverbDecayChange = onReverbDecayChange,
+                reverbScopeAll = reverbScopeAll,
+                onReverbScopeChange = onReverbScopeChange,
                 onImportToPad = {
                     showEqPanel = false
                     onImportToPad()
@@ -322,6 +337,9 @@ fun RightPanel(
                 onSpeedChange = onSpeedChange,
                 padPlayMode = padPlayMode,           // MOVED from EQ/FX panel
                 onPlayModeChange = onPlayModeChange,
+                scopeAll = bpmScopeAll,
+                onScopeChange = onBpmScopeChange,
+                selectedPad = selectedPad,
                 onClose = { showTempoPanel = false }
             )
         }

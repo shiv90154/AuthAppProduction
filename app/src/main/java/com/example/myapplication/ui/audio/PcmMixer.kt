@@ -50,8 +50,15 @@ object PcmMixer {
         padB: Int,
         factoryResIds: List<Int>
     ): File? = withContext(Dispatchers.IO) {
-        val pcmA = resolvePcm(context, kitIndex, padA, factoryResIds) ?: return@withContext null
-        val pcmB = resolvePcm(context, kitIndex, padB, factoryResIds) ?: return@withContext null
+        // A blank pad (no custom audio, no factory sample) used to make the
+        // whole operation return null — so Mix/Add To End silently did
+        // nothing whenever either pad was empty, which is the normal state in
+        // a blank kit. Treat an empty side as silence of zero length instead.
+        val decodedA = resolvePcm(context, kitIndex, padA, factoryResIds)
+        val decodedB = resolvePcm(context, kitIndex, padB, factoryResIds)
+        if (decodedA == null && decodedB == null) return@withContext null
+        val pcmA = decodedA ?: decodedB!!.let { PcmResult(ShortArray(0), it.channels, it.sampleRate) }
+        val pcmB = decodedB ?: pcmA.let { PcmResult(ShortArray(0), it.channels, it.sampleRate) }
 
         val outSampleRate = max(pcmA.sampleRate, pcmB.sampleRate)
         val outChannels   = max(pcmA.channels, pcmB.channels)   // use widest
@@ -71,10 +78,7 @@ object PcmMixer {
             mixed[i] = sum.toInt().toShort()
         }
 
-        val outFile = File(
-            context.cacheDir,
-            "mix_${System.currentTimeMillis()}.m4a"
-        )
+        val outFile = File(outDir(context), "mix_${System.currentTimeMillis()}.m4a")
         encodeToM4a(mixed, outChannels, outSampleRate, outFile)
         outFile
     }
@@ -90,8 +94,12 @@ object PcmMixer {
         padB: Int,
         factoryResIds: List<Int>
     ): File? = withContext(Dispatchers.IO) {
-        val pcmA = resolvePcm(context, kitIndex, padA, factoryResIds) ?: return@withContext null
-        val pcmB = resolvePcm(context, kitIndex, padB, factoryResIds) ?: return@withContext null
+        // Same empty-pad tolerance as mixPads() above.
+        val decodedA = resolvePcm(context, kitIndex, padA, factoryResIds)
+        val decodedB = resolvePcm(context, kitIndex, padB, factoryResIds)
+        if (decodedA == null && decodedB == null) return@withContext null
+        val pcmA = decodedA ?: decodedB!!.let { PcmResult(ShortArray(0), it.channels, it.sampleRate) }
+        val pcmB = decodedB ?: pcmA.let { PcmResult(ShortArray(0), it.channels, it.sampleRate) }
 
         val outSampleRate = max(pcmA.sampleRate, pcmB.sampleRate)
         val outChannels   = max(pcmA.channels, pcmB.channels)
@@ -103,13 +111,15 @@ object PcmMixer {
         samplesA.copyInto(joined, 0)
         samplesB.copyInto(joined, samplesA.size)
 
-        val outFile = File(
-            context.cacheDir,
-            "concat_${System.currentTimeMillis()}.m4a"
-        )
+        val outFile = File(outDir(context), "concat_${System.currentTimeMillis()}.m4a")
         encodeToM4a(joined, outChannels, outSampleRate, outFile)
         outFile
     }
+
+    // filesDir, not cacheDir: the result becomes a pad's persistent custom
+    // sound, and the OS may purge cacheDir at any time (pad then goes silent).
+    private fun outDir(context: Context): File =
+        File(context.filesDir, "pad_audio").apply { mkdirs() }
 
     private fun resample(src: PcmResult, targetRate: Int, targetChannels: Int): ShortArray {
         if (src.sampleRate == targetRate && src.channels == targetChannels) return src.pcm

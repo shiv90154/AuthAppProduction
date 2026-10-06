@@ -42,6 +42,11 @@ fun TempoPanel(
     // repeated hits instead of cutting off)
     padPlayMode: String = "ONESHOT",
     onPlayModeChange: (String) -> Unit = {},
+    // BPM/SPEED scope: ALL = every pad of the kit moves together; SINGLE =
+    // only the selected pad's own BPM/SPEED changes.
+    scopeAll: Boolean = true,
+    onScopeChange: (Boolean) -> Unit = {},
+    selectedPad: Int = 0,
     onClose: () -> Unit,
     width: androidx.compose.ui.unit.Dp = 200.dp
 ) {
@@ -80,6 +85,27 @@ fun TempoPanel(
             }
 
             Box(Modifier.fillMaxWidth().height(1.dp).background(TempoDivider))
+
+            // ── Scope: SINGLE pad vs ALL pads ──────────────────────────────
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(false to "SINGLE PAD", true to "ALL PADS").forEach { (all, label) ->
+                    val selected = scopeAll == all
+                    Box(
+                        modifier = Modifier.weight(1f).height(28.dp).clip(RoundedCornerShape(6.dp))
+                            .background(if (selected) TempoAccent else Color(0xFF2A2A2A))
+                            .clickable(remember { MutableInteractionSource() }, null) { onScopeChange(all) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(label, color = if (selected) Color.Black else TempoTextMuted,
+                             fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Text(
+                if (scopeAll) "BPM / SPEED apply to all 8 pads"
+                else "BPM / SPEED apply to PAD ${selectedPad + 1} only",
+                color = TempoTextMuted, fontSize = 8.sp
+            )
 
             // ── BPM display + stepper (base loop beat rate) ───────────────
             Box(

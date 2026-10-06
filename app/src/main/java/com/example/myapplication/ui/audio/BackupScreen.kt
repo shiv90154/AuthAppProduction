@@ -117,11 +117,24 @@ fun BackupScreen(onClose: () -> Unit) {
                 color = Color(0xFFAAAAAA), fontSize = 10.sp, textAlign = TextAlign.Center
             )
 
+            // Some phones ship without a document picker that can handle the
+            // request — launch() then throws ActivityNotFoundException, which
+            // used to crash/no-op silently ("backup nahi ban raha").
             ActionRow("EXPORT / BACKUP", Color(0xFF003333), BtnActive, enabled = !busy) {
-                createLauncher.launch("octapad_backup_${System.currentTimeMillis()}.zip")
+                try {
+                    createLauncher.launch("octapad_backup_${System.currentTimeMillis()}.zip")
+                } catch (e: Exception) {
+                    statusMsg = "Backup failed: no file manager available (${e.message})"
+                    isError = true
+                }
             }
             ActionRow("RESTORE BACKUP", Color(0xFF332200), Color(0xFFFFB74D), enabled = !busy) {
-                openLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                try {
+                    openLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
+                } catch (e: Exception) {
+                    statusMsg = "Restore failed: no file manager available (${e.message})"
+                    isError = true
+                }
             }
 
             if (busy) {
@@ -163,6 +176,14 @@ private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
     context.contentResolver.openOutputStream(destUri)?.use { out ->
         ZipOutputStream(out).use { zip ->
             val audiosJson = JSONArray()
+            // Kit Copy makes several AudioItems share one underlying file (and
+            // ids are millisecond timestamps, so two can even collide) — a
+            // second ZipEntry with an already-used name throws "duplicate
+            // entry" and used to abort the whole backup on those phones. Each
+            // distinct source file is now written once and referenced by every
+            // item that points at it.
+            val entryByUri = HashMap<String, String>()
+            val usedNames = HashSet<String>()
 
             AudioRepository.getAll().forEach { item ->
                 val entryObj = JSONObject()
@@ -172,14 +193,32 @@ private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
                 entryObj.put("assignedPad", item.assignedPad)
                 entryObj.put("assignedKit", item.assignedKit)
 
-                val opened = runCatching { context.contentResolver.openInputStream(item.uri) }.getOrNull()
-                if (opened != null) {
-                    val entryName = "audio/${item.id}.dat"
-                    opened.use { input ->
-                        zip.putNextEntry(ZipEntry(entryName))
-                        input.copyTo(zip)
-                        zip.closeEntry()
+                val uriKey = item.uri.toString()
+                var entryName = entryByUri[uriKey]
+                if (entryName == null) {
+                    val opened = runCatching { context.contentResolver.openInputStream(item.uri) }.getOrNull()
+                    if (opened != null) {
+                        var candidate = "audio/${item.id}.dat"
+                        var n = 1
+                        while (!usedNames.add(candidate)) candidate = "audio/${item.id}_${n++}.dat"
+                        var started = false
+                        try {
+                            opened.use { input ->
+                                zip.putNextEntry(ZipEntry(candidate))
+                                started = true
+                                input.copyTo(zip)
+                            }
+                            entryName = candidate
+                            entryByUri[uriKey] = candidate
+                        } catch (e: java.io.IOException) {
+                            // Unreadable source file — skip this one sound, keep the rest.
+                            android.util.Log.w("BackupScreen", "Skipping audio ${item.id}: ${e.message}")
+                        } finally {
+                            if (started) runCatching { zip.closeEntry() }
+                        }
                     }
+                }
+                if (entryName != null) {
                     entryObj.put("zipEntry", entryName)
                     audioCount++
                 }
@@ -214,12 +253,22 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
         ZipInputStream(input).use { zip ->
             var entry = zip.nextEntry
             while (entry != null) {
-                if (entry.name == "backup.json") {
-                    backupJson = JSONObject(zip.readBytes().toString(Charsets.UTF_8))
-                } else if (entry.name.startsWith("audio/")) {
-                    val outFile = File(restoredDir, entry.name.substringAfterLast("/"))
-                    outFile.outputStream().use { fos -> zip.copyTo(fos) }
-                    extractedFiles[entry.name] = outFile
+                // Backups that were re-zipped / passed through a file manager or
+                // chat app can carry directory entries ("audio/") and nest
+                // everything under a top-level folder. Match on the basename so
+                // those still restore, and never treat a directory entry as a
+                // file (its empty basename resolved to restored_audio itself →
+                // "open failed: EISDIR").
+                val name = entry.name.replace('\\', '/')
+                val base = name.substringAfterLast('/')
+                if (!entry.isDirectory && base.isNotEmpty()) {
+                    if (base.equals("backup.json", ignoreCase = true)) {
+                        backupJson = JSONObject(zip.readBytes().toString(Charsets.UTF_8).trimStart('﻿'))
+                    } else if (name.startsWith("audio/") || name.contains("/audio/")) {
+                        val outFile = File(restoredDir, base)
+                        outFile.outputStream().use { fos -> zip.copyTo(fos) }
+                        extractedFiles["audio/$base"] = outFile
+                    }
                 }
                 zip.closeEntry()
                 entry = zip.nextEntry
@@ -263,7 +312,7 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
             for (i in 0 until audiosJson.length()) {
                 val obj = audiosJson.getJSONObject(i)
                 val zipEntry = obj.optString("zipEntry", "")
-                val file = if (zipEntry.isNotEmpty()) extractedFiles[zipEntry] else null
+                val file = if (zipEntry.isNotEmpty()) extractedFiles["audio/" + zipEntry.substringAfterLast('/')] else null
                 if (file != null) {
                     val item = AudioItem(
                         id = obj.getLong("id"),

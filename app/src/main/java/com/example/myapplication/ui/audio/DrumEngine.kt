@@ -36,6 +36,13 @@ object DrumEngine {
     private val pendingKey = arrayOfNulls<String>(24)
     private val loadJobs = arrayOfNulls<Job>(24)
 
+    /**
+     * Invoked (on a background thread) right after a native slot's buffer has
+     * been replaced. Loading drops that slot's BPM-stretched copy natively, so
+     * OctapadScreen uses this to re-request the stretch for the new sample.
+     */
+    @Volatile var onSlotLoaded: ((Int) -> Unit)? = null
+
     // Cached once the stream is open — never assume a fixed rate (e.g.
     // 48000) anywhere ms-based timing gets converted to frames; the engine
     // opens at whatever rate the device actually grants (see AudioEngine::start()).
@@ -79,9 +86,15 @@ object DrumEngine {
         // switching to an empty kit still played the old kit's audio.
         if (assigned == null && defaultResId == -1) {
             val silentKey = "silent:$nativeSlot"
+            // Supersede any in-flight decode for this slot — otherwise a
+            // slow decode of the pad's previous sound lands AFTER this
+            // silence and the "cleared"/swapped-away pad plays it again.
+            pendingKey[nativeSlot] = silentKey
+            loadJobs[nativeSlot]?.cancel()
             if (loadedKey[nativeSlot] != silentKey) {
                 NativeBridge.loadPadAudio(nativeSlot, ShortArray(64), 1, 44100)
                 loadedKey[nativeSlot] = silentKey
+                onSlotLoaded?.invoke(nativeSlot)
             }
             return
         }
@@ -109,6 +122,7 @@ object DrumEngine {
                 val pcm = if (reversed) reversePcm(result.pcm, result.channels) else result.pcm
                 NativeBridge.loadPadAudio(nativeSlot, pcm, result.channels, result.sampleRate)
                 loadedKey[nativeSlot] = key
+                onSlotLoaded?.invoke(nativeSlot)
 
                 // Cache the REAL duration for factory (non-custom) samples —
                 // used instead of a guessed default so LOOP-mode timing and

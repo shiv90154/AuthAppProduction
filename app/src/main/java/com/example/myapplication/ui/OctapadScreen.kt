@@ -642,7 +642,16 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
         kits.getOrNull(currentKitB)?.padBpm?.toList(),
         kits.getOrNull(currentKitB)?.padSpeed?.toList()
     ) {
-        for (slot in 0 until 16) requestStretchSync(slot)
+        // The stretch passes run one after another (stretchMutex), so the
+        // order they are requested in decides how soon the pads you can
+        // actually hear get the new tempo: audible bank(s) first, the
+        // selected pad before the rest, the silent bank last. Before this a
+        // live BPM change walked slots 0..15 in numeric order and the pad
+        // that was looping could be the last one served.
+        val audibleSlots = (0 until 8).flatMap { nativeSlotsFor(it) }.toSet()
+        (0 until 16)
+            .sortedWith(compareBy({ if (it in audibleSlots) 0 else 1 }, { if (it % 8 == selectedPad) 0 else 1 }))
+            .forEach { requestStretchSync(it) }
     }
 
     // Sync per-pad EQ to native whenever currentKit or selectedPad changes
@@ -2709,6 +2718,14 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
             )
         }
 
+        // MIDI connect/disconnect indicator — in the thin strip above the pads,
+        // draws over nothing interactive and takes no touches.
+        MidiStatusBadge(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 2.dp)
+        )
+
         // ── KitListScreen overlay ─────────────────────────────────────────────
         // Bank-aware (2026-09-12, same convention as bankKitIdx() elsewhere):
         // while Bank B is the active selection, the Patch List browses/edits
@@ -2960,7 +2977,13 @@ fun OctapadScreen(soundPool: SoundPool, sounds: List<Int>, onDeactivated: () -> 
 
             "BACKUP" -> {
                 com.example.myapplication.ui.audio.BackupScreen(
-                    onClose = { topPanel = "" }
+                    onClose = { topPanel = "" },
+                    // A restore rewrites the SAVED kits; the `kits` list in
+                    // this composition is still the pre-restore one. BackupScreen
+                    // reloads the whole screen right after this — make sure
+                    // nothing in the meantime saves the old kits back over the
+                    // restored ones.
+                    onRestored = { persistDebounceJob?.cancel() }
                 )
             }
 

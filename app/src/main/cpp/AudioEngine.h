@@ -80,6 +80,12 @@ struct Voice {
     // raw recorded length, without changing its pitch. Same write-then-
     // `ready` discipline as every other Voice field above.
     std::atomic<bool>  useStretchedBuffer{false};
+    // Which of the pad's two stretched-copy slots (0/1) this voice reads when
+    // useStretchedBuffer is set — see AudioEngine::stretchedBuffers_. A voice
+    // keeps reading the copy it started on even after a newer BPM stretch has
+    // been published into the other slot, so changing BPM never cuts or fades
+    // a loop that is already sounding.
+    std::atomic<int>   stretchIdx{0};
     // 0 = dry, 1..3 = ROOM 1 / ROOM 2 / HALL — which reverb bus this voice
     // feeds (see AudioEngine::reverbs_). Written before `ready` like every
     // other Voice field.
@@ -117,7 +123,9 @@ public:
     // correlation search) — call from Kotlin only when the ratio actually
     // changes, never on every audio-thread callback.
     void setPadLoopStretch(int padIndex, float ratio);
-    void releaseStretchedVoices(int padIndex);
+    // Fades out voices of padIndex that read a stretched copy (only those on
+    // `onlySlot` if >= 0). Last-resort fallback now — see setPadLoopStretch().
+    void releaseStretchedVoices(int padIndex, int onlySlot = -1);
     // Reverb (per pad). type: 0 = off, 1 = ROOM 1, 2 = ROOM 2, 3 = HALL.
     // decay: 0..1 — how long the tail rings. Read by triggerPad() at hit
     // time, so changing it never affects a voice that is already sounding.
@@ -152,11 +160,25 @@ public:
 private:
     std::shared_ptr<oboe::AudioStream> stream_;
     std::array<PadBuffer, kMaxPads>    buffers_;
-    // Pitch-preserving time-stretched copies of buffers_, one slot per pad,
+    // Pitch-preserving time-stretched copies of buffers_, TWO slots per pad,
     // filled on demand by setPadLoopStretch() and read by onAudioReady()
     // whenever a Voice has useStretchedBuffer set. Guarded by the same
     // bufferMutex_ as buffers_ itself.
-    std::array<PadBuffer, kMaxPads>    stretchedBuffers_;
+    //
+    // Two slots (2026-10-06, "BPM badalte hi 1 second ruk jata hai"): a new
+    // stretch used to overwrite the single copy in place, which forced every
+    // voice still reading the old one to be faded out — a looping pad went
+    // silent from that moment until its next retrigger (up to a whole sample
+    // length later). Now a new stretch is written into the slot that is NOT
+    // active, new hits start on it, and voices already sounding finish on
+    // the old slot untouched; the old slot is freed once nothing reads it.
+    std::array<std::array<PadBuffer, 2>, kMaxPads> stretchedBuffers_;
+    // Which slot new hits should use: 0 = none (play the raw buffer),
+    // 1 = slot 0, 2 = slot 1. Guarded by bufferMutex_.
+    std::array<int, kMaxPads>          stretchActiveSlot_{};
+    // Caller must hold bufferMutex_.
+    bool stretchSlotInUse(int padIndex, int slot) const;
+    void reclaimStretchSlots(int padIndex);
     // Bumped every time loadPadBuffer() replaces a pad's raw sample.
     // setPadLoopStretch() captures this before its (unlocked) WSOLA pass and
     // refuses to publish into stretchedBuffers_ if it changed in the

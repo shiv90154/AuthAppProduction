@@ -1,14 +1,47 @@
 package com.example.myapplication
 
 import android.content.Context
-import android.media.midi.*
+import android.media.midi.MidiDevice
+import android.media.midi.MidiDeviceInfo
+import android.media.midi.MidiManager
+import android.media.midi.MidiOutputPort
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 
+/**
+ * Connects to every MIDI controller that is plugged in — now AND later.
+ *
+ * This used to list the devices once from MainActivity.onCreate() and never
+ * look again, so a controller plugged in (or re-plugged) after the app had
+ * started was silently never connected. A device callback is registered
+ * instead: each controller is opened when it appears, closed when it goes,
+ * and [MidiConnectionState] is updated both times so the screen can show it.
+ *
+ * Safe to call [listDevices] from every Activity (re)creation — the actual
+ * setup runs once per process and everything is main-thread only.
+ */
 class MidiManagerHelper(
-    private val context: Context
+    context: Context
 ) {
+    private val appContext = context.applicationContext
+
+    fun listDevices() {
+        MidiHotplug.start(appContext)
+    }
+}
+
+private object MidiHotplug {
+
+    private const val TAG = "MIDI_TEST"
+
+    private var started = false
+    private val handler = Handler(Looper.getMainLooper())
+
+    // Main-thread only (callbacks below are all delivered on `handler`).
+    private class Open(val device: MidiDevice, val port: MidiOutputPort)
+    private val open = HashMap<Int, Open>()
+    private val pending = HashSet<Int>()
 
     // MidiManager.devices was deprecated in API 31 in favor of
     // getDevicesForTransport(TRANSPORT_MIDI_BYTE_STREAM) — but minSdk here
@@ -17,86 +50,80 @@ class MidiManagerHelper(
     // avoid introducing an untested API-31+ code path with no device to
     // verify it on.
     @Suppress("DEPRECATION")
-    fun listDevices() {
+    fun start(context: Context) {
+        if (started) return
 
-        // BUG FIX: getSystemService(MidiManager::class.java) can return null
-        // on devices without MIDI support — this used to be dereferenced
-        // unconditionally, which would crash the app on launch (this is
-        // called unconditionally from MainActivity.onCreate) on any such
-        // device before the user ever sees a screen.
-        val midiManager =
-            context.getSystemService(
-                MidiManager::class.java
-            ) ?: run {
-                Log.d("MIDI_TEST", "MidiManager unavailable on this device — skipping MIDI setup")
-                return
-            }
-
-        val devices =
-            midiManager.devices
-
-        Log.d(
-            "MIDI_TEST",
-            "Devices Found = ${devices.size}"
-        )
-
-        if (devices.isEmpty()) {
-            Log.d(
-                "MIDI_TEST",
-                "No MIDI Device Found"
-            )
+        // getSystemService(MidiManager::class.java) can return null on
+        // devices without MIDI support — dereferencing it used to crash the
+        // app on launch before the user ever saw a screen.
+        val midiManager = context.getSystemService(MidiManager::class.java) ?: run {
+            Log.d(TAG, "MidiManager unavailable on this device — skipping MIDI setup")
             return
         }
+        started = true
 
-        for (deviceInfo in devices) {
+        midiManager.registerDeviceCallback(object : MidiManager.DeviceCallback() {
+            override fun onDeviceAdded(device: MidiDeviceInfo) {
+                connect(midiManager, device)
+            }
 
-            Log.d(
-                "MIDI_TEST",
-                "Device = ${deviceInfo.properties}"
-            )
+            override fun onDeviceRemoved(device: MidiDeviceInfo) {
+                disconnect(device)
+            }
+        }, handler)
 
-            midiManager.openDevice(
-                deviceInfo,
-                onOpened@{ device ->
+        val devices = midiManager.devices
+        Log.d(TAG, "Devices Found = ${devices.size}")
+        for (info in devices) connect(midiManager, info)
+    }
 
-                    // BUG FIX: MidiManager.OnDeviceOpenedListener can be
-                    // called with a null device if opening failed (device
-                    // unplugged mid-open, permission revoked, etc.) — this
-                    // used to be dereferenced unconditionally below, which
-                    // would crash with an NPE instead of just skipping that
-                    // device. openDevice() is a plain (non-inline) Java SDK
-                    // method, so this must be a local return via an explicit
-                    // label, not a bare `return`.
-                    if (device == null) {
-                        Log.d("MIDI_TEST", "Device failed to open — skipping")
-                        return@onOpened
-                    }
+    private fun nameOf(info: MidiDeviceInfo): String {
+        val p = info.properties
+        return p.getString(MidiDeviceInfo.PROPERTY_NAME)
+            ?: p.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
+            ?: "MIDI device"
+    }
 
-                    Log.d(
-                        "MIDI_TEST",
-                        "Device Opened"
-                    )
+    private fun connect(midiManager: MidiManager, info: MidiDeviceInfo) {
+        // A device with no output port never sends us anything (a synth /
+        // sound module) — not a controller, nothing to connect.
+        if (info.outputPortCount == 0) return
+        val id = info.id
+        if (open.containsKey(id) || !pending.add(id)) return
 
-                    val outputPort =
-                        device.openOutputPort(0)
+        midiManager.openDevice(info, onOpened@{ device ->
+            // Null when opening failed (unplugged mid-open, permission
+            // revoked, ...). Also skip a device that was removed while the
+            // open request was still in flight.
+            val stillWanted = pending.remove(id)
+            if (device == null || !stillWanted) {
+                Log.d(TAG, "Device failed to open or already gone — skipping")
+                runCatching { device?.close() }
+                return@onOpened
+            }
 
-                    if (outputPort != null) {
+            val port = device.openOutputPort(0)
+            if (port == null) {
+                Log.d(TAG, "Device has no usable output port — skipping")
+                runCatching { device.close() }
+                return@onOpened
+            }
+            port.connect(MidiReceiverHandler())
+            open[id] = Open(device, port)
+            MidiConnectionState.deviceConnected(id, nameOf(info))
+            Log.d(TAG, "Receiver Connected: ${nameOf(info)}")
+        }, handler)
+    }
 
-                        outputPort.connect(
-                            MidiReceiverHandler()
-                        )
-
-                        Log.d(
-                            "MIDI_TEST",
-                            "Receiver Connected"
-                        )
-                    }
-
-                },
-                Handler(
-                    Looper.getMainLooper()
-                )
-            )
+    private fun disconnect(info: MidiDeviceInfo) {
+        val id = info.id
+        pending.remove(id)
+        val entry = open.remove(id)
+        if (entry != null) {
+            runCatching { entry.port.close() }
+            runCatching { entry.device.close() }
         }
+        MidiConnectionState.deviceDisconnected(id)
+        Log.d(TAG, "Device removed: ${nameOf(info)}")
     }
 }

@@ -57,7 +57,9 @@ fun PatchExportScreen(kitIndex: Int, kitName: String, onClose: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
 
     val safeFileName = remember(kitName) {
-        kitName.replace(Regex("[^A-Za-z0-9 _-]"), "").trim().ifBlank { "patch" }
+        // Keep any language's letters/digits (a "हिंदी पैच" patch used to be
+        // saved as plain "patch" because only A-Z/0-9 survived).
+        kitName.replace(Regex("[^\\p{L}\\p{M}\\p{N} _-]"), "").trim().ifBlank { "patch" }
     }
 
     val createLauncher = rememberLauncherForActivityResult(

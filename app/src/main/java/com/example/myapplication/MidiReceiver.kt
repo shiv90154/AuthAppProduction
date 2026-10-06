@@ -33,6 +33,9 @@ class MidiReceiverHandler : MidiReceiver() {
     ) {
         if (count < 2) return
 
+        // Lets the on-screen MIDI badge blink on incoming traffic.
+        MidiConnectionState.noteMessageReceived()
+
         val status  = data[offset].toInt() and 0xFF
         val command = status and 0xF0
         val channel = (status and 0x0F) + 1

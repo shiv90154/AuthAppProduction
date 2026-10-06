@@ -166,6 +166,12 @@ object DrumEngine {
         loadedKey[padIndex] = null
     }
 
+    /** Forget every slot's loaded-sample cache so the next loadPad() re-decodes
+     *  all of them — used after Restore Backup replaces the whole audio library. */
+    fun invalidateAll() {
+        for (i in loadedKey.indices) loadedKey[i] = null
+    }
+
     fun setVolume(padIndex: Int, volume: Float) = NativeBridge.setPadVolumeNative(padIndex, volume)
     fun setPitch(padIndex: Int, pitch: Float) = NativeBridge.setPadPitchNative(padIndex, pitch)
     fun setPan(padIndex: Int, pan: Float) = NativeBridge.setPadPanNative(padIndex, pan)

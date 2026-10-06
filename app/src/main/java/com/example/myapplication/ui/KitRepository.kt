@@ -262,6 +262,25 @@ object KitRepository {
         return kitsStr
     }
 
+    // Auto-generated placeholder names ("KIT 026", "EMPTY 031", "EMPTY B 003")
+    // — anything else was typed by the user.
+    private val DEFAULT_NAME = Regex("^(KIT|EMPTY|EMPTY B) \\d+$")
+
+    /** Names the user actually gave their kits (e.g. "HINDI PATCH") in a
+     *  backup payload, in kit order. Never throws — a bad payload just yields
+     *  an empty list (validateBackupPayload() is what rejects it). */
+    fun customNamesIn(obj: JSONObject): List<String> = try {
+        val kitsStr = if (obj.has(KEY_KITS)) obj.getString(KEY_KITS) else null
+        if (kitsStr == null) emptyList() else {
+            val arr = JSONArray(kitsStr)
+            (0 until arr.length())
+                .map { arr.getJSONObject(it).optString("name", "") }
+                .filter { it.isNotBlank() && !DEFAULT_NAME.matches(it) }
+        }
+    } catch (e: Exception) {
+        emptyList()
+    }
+
     fun importBackup(obj: JSONObject) {
         val ctx = appContext ?: return
         // Validate the kit payload actually parses into real kit entries

@@ -46,7 +46,13 @@ import java.util.zip.ZipOutputStream
  * the exact same payload.
  */
 @Composable
-fun BackupScreen(onClose: () -> Unit) {
+fun BackupScreen(
+    onClose: () -> Unit,
+    // Called right after a restore succeeded, just before the screen
+    // reloads itself — OctapadScreen uses it to drop anything that would
+    // otherwise write the OLD in-memory kits back over the restored ones.
+    onRestored: () -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -62,8 +68,10 @@ fun BackupScreen(onClose: () -> Unit) {
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { writeBackup(context, uri) } }
             busy = false
-            result.onSuccess { count ->
-                statusMsg = "Backup saved — $count audio file(s) included."
+            result.onSuccess { summary ->
+                statusMsg = "Backup saved — ${summary.audioCount} audio file(s), " +
+                    "${summary.customKitNames.size} named patch(es)" +
+                    (if (summary.customKitNames.isEmpty()) "." else ": ${summary.namesPreview()}.")
                 isError = false
             }.onFailure {
                 statusMsg = "Backup failed: ${it.message}"
@@ -80,9 +88,25 @@ fun BackupScreen(onClose: () -> Unit) {
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { restoreBackup(context, uri) } }
             busy = false
-            result.onSuccess { count ->
-                statusMsg = "Restored $count audio file(s). Close and reopen the app to see the restored kits."
+            result.onSuccess { summary ->
                 isError = false
+                // Restore only rewrites the saved data. The screen underneath
+                // is still holding the OLD kits in memory (that's why restored
+                // patch names didn't show up, and why the next edit could save
+                // the old names right back over the restored ones). Reload the
+                // whole screen from the restored data instead of asking the
+                // user to restart the app by hand.
+                val names = if (summary.customKitNames.isEmpty()) "" else "\n${summary.namesPreview()}"
+                statusMsg = "Restored ${summary.audioCount} sound(s), " +
+                    "${summary.customKitNames.size} named patch(es). Reloading…"
+                android.widget.Toast.makeText(
+                    context,
+                    "Backup restored — ${summary.customKitNames.size} named patch(es)$names",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+                onRestored()
+                kotlinx.coroutines.delay(900)
+                context.findActivity()?.recreate()
             }.onFailure {
                 statusMsg = "Restore failed: ${it.message}"
                 isError = true
@@ -169,10 +193,30 @@ private fun ActionRow(label: String, bg: Color, fg: Color, enabled: Boolean, onC
     }
 }
 
+/** What a backup/restore touched: sounds copied, and the patch names the user
+ *  actually gave their kits (placeholders like "KIT 003"/"EMPTY 031" excluded). */
+private class BackupSummary(val audioCount: Int, val customKitNames: List<String>) {
+    fun namesPreview(max: Int = 4): String {
+        val shown = customKitNames.take(max).joinToString(", ")
+        val more = customKitNames.size - max
+        return if (more > 0) "$shown +$more more" else shown
+    }
+}
+
+internal fun android.content.Context.findActivity(): android.app.Activity? {
+    var c: android.content.Context? = this
+    while (c is android.content.ContextWrapper) {
+        if (c is android.app.Activity) return c
+        c = c.baseContext
+    }
+    return null
+}
+
 // ── Export ───────────────────────────────────────────────────────────────────
 
-private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
+private fun writeBackup(context: android.content.Context, destUri: Uri): BackupSummary {
     var audioCount = 0
+    var customNames: List<String> = emptyList()
     context.contentResolver.openOutputStream(destUri)?.use { out ->
         ZipOutputStream(out).use { zip ->
             val audiosJson = JSONArray()
@@ -227,7 +271,9 @@ private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
 
             val root = JSONObject()
             root.put("version", 1)
-            root.put("kits", KitRepository.exportBackup())
+            val kitsPayload = KitRepository.exportBackup()
+            customNames = KitRepository.customNamesIn(kitsPayload)
+            root.put("kits", kitsPayload)
             root.put("preferences", PreferencesRepository.exportBackup())
             CcMapRepository.exportBackup()?.let { root.put("ccMap", it) }
             NoteMapRepository.exportBackup()?.let { root.put("noteActionMap", it) }
@@ -239,12 +285,12 @@ private fun writeBackup(context: android.content.Context, destUri: Uri): Int {
             zip.closeEntry()
         }
     } ?: throw IllegalStateException("Could not open destination file")
-    return audioCount
+    return BackupSummary(audioCount, customNames)
 }
 
 // ── Restore ──────────────────────────────────────────────────────────────────
 
-private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
+private fun restoreBackup(context: android.content.Context, srcUri: Uri): BackupSummary {
     val restoredDir = File(context.filesDir, "restored_audio").apply { mkdirs() }
     var backupJson: JSONObject? = null
     val extractedFiles = mutableMapOf<String, File>() // zipEntry -> file on disk
@@ -329,7 +375,10 @@ private fun restoreBackup(context: android.content.Context, srcUri: Uri): Int {
             AudioRepository.replaceAll(items)
         }
 
-        return restoredCount
+        // Every native slot must re-decode from the restored library.
+        DrumEngine.invalidateAll()
+
+        return BackupSummary(restoredCount, root.optJSONObject("kits")?.let { KitRepository.customNamesIn(it) } ?: emptyList())
     } catch (e: Exception) {
         // A partially/incompatible backup (e.g. invalid kit data) must not
         // leave orphaned extracted audio files behind on disk.
